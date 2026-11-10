@@ -19,8 +19,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The updater compares the number compiled into the build with the release
+  # tag. If the two disagree the release would offer an update that changes
+  # nothing, so the tag has to be the version in Cargo.toml — checked before
+  # anything is built.
+  tag-matches-version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the tag with the package version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          tag=${GITHUB_REF_NAME#v}
+          echo "Cargo.toml: $version   tag: $GITHUB_REF_NAME"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
   linux:
     name: linux (x86_64)
+    needs: tag-matches-version
     runs-on: ubuntu-24.04
     # Built inside an old-base image on purpose: the glibc a binary links
     # against becomes the glibc every user needs. Debian 12 gives 2.36, which
@@ -81,6 +102,7 @@ jobs:
 
   macos:
     name: macos (universal)
+    needs: tag-matches-version
     # One download that runs on every Mac: both slices are built on the same
     # runner and joined with lipo, so the person downloading needs no Rosetta
     # decision. macos-15-intel is the label that actually gets a machine on this
@@ -132,6 +154,7 @@ jobs:
 
   windows:
     name: windows (x86_64)
+    needs: tag-matches-version
     runs-on: windows-2022
     # Static C runtime on purpose. The default MSVC build imports VCRUNTIME140.dll,
     # which comes from the Visual C++ redistributable — present on most PCs,
@@ -186,10 +209,20 @@ jobs:
     if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
+      # Checkout, because the installer itself is one of the downloads: it is
+      # copied from the repository at the tag, not from any build artifact.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # The installer on its own, so the one-line command in the README and in
+      # these notes has something stable to point at:
+      #   .../releases/latest/download/install.sh
+      - name: Publish the installer beside the downloads
+        run: cp install.sh dist/install.sh
 
       - name: List downloads
         run: ls -l dist
@@ -206,11 +239,27 @@ jobs:
             player provides, so install VLC first (videolan.org) and let it update
             as usual.
 
-            **Linux** — the tarball, which has `install.sh` (no root), or the `.deb`:
+            **Linux (64-bit Intel or AMD)** — one line in a terminal. It works in
+            fish, bash and zsh, fetches the newest version, checks its fingerprint and
+            installs it without root:
             ```sh
-            tar -xzf vlccraft-*-x86_64-linux.tar.gz
-            ./vlccraft-*-x86_64-linux/install.sh
+            curl -fsSL https://github.com/mjb73/vlccraft/releases/latest/download/install.sh -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
             ```
+
+            Or download `install.sh` from the list below and run:
+            ```sh
+            sh ~/Downloads/install.sh
+            ```
+            It unpacks whatever VLCCraft download is in your Downloads folder, or
+            fetches the newest one if there is none, then puts the program in
+            `~/.local/bin` together with a menu entry. `sh install.sh --uninstall`
+            undoes that and keeps your library and settings.
+
+            Inside the tarball is the same installer, if you would rather not download
+            two files: unpack it, then run the `install.sh` in the folder it makes.
+            A terminal starts in your home folder, so name the download's folder
+            explicitly (`cd ~/Downloads` first) — `Cannot open: No such file or
+            directory` only ever means the file is somewhere else.
 
             **macOS** — open the `.dmg` and drag VLCCraft to Applications. It is a
             universal download: the same file runs natively on Apple silicon and on

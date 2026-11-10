@@ -34,8 +34,7 @@ Section: video
 Priority: optional
 Architecture: $arch
 Installed-Size: $size
-Depends: libc6 (>= 2.36), libxkbcommon0, libwayland-client0, libgl1, libegl1
-Recommends: vlc
+Depends: libc6 (>= 2.36), libxkbcommon0, libwayland-client0, libgl1, libegl1, vlc
 Maintainer: mjb73 <mjb73@users.noreply.github.com>
 Description: A calm skin over the VLC you already have
  VLCCraft draws its own interface and loads the libvlc that the installed

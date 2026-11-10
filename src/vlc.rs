@@ -163,6 +163,83 @@ pub struct Track {
     pub name: String,
 }
 
+/// Why the engine could not be started, in a form the interface can act on:
+/// "VLC is not installed" earns a setup card, while a broken library earns a
+/// line of explanation without pretending the person forgot to install it.
+#[derive(Debug, Clone)]
+pub struct EngineError {
+    pub missing: bool,
+    pub detail: String,
+}
+
+impl EngineError {
+    pub fn other(msg: impl Into<String>) -> Self {
+        Self {
+            missing: false,
+            detail: msg.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl From<String> for EngineError {
+    fn from(detail: String) -> Self {
+        Self {
+            missing: false,
+            detail,
+        }
+    }
+}
+
+impl From<&str> for EngineError {
+    fn from(detail: &str) -> Self {
+        Self::other(detail)
+    }
+}
+
+/// What `--vlc-status` reports: the installed engine, without starting it.
+pub struct Probe {
+    pub version: String,
+    pub path: std::path::PathBuf,
+}
+
+/// Finds the system VLC library and reads its version without creating an
+/// instance. Used by the installer and by `--vlc-status`, so both answer the
+/// question exactly as the player itself would.
+pub fn probe() -> Result<Probe, String> {
+    let mut last = String::new();
+    for candidate in crate::platform::vlc_library_candidates() {
+        match unsafe { Library::new(&candidate) } {
+            Ok(lib) => {
+                let version = unsafe {
+                    let get_version: GetVersion = *lib
+                        .get(b"libvlc_get_version\0")
+                        .map_err(|e| format!("libvlc_get_version missing: {e}"))?;
+                    CStr::from_ptr(get_version()).to_string_lossy().to_string()
+                };
+                unsafe {
+                    lib.get::<VlcNew>(b"libvlc_new\0")
+                        .map_err(|e| format!("libvlc_new missing: {e}"))?;
+                }
+                return Ok(Probe {
+                    version,
+                    path: candidate,
+                });
+            }
+            Err(e) => last = format!("{}: {e}", candidate.display()),
+        }
+    }
+    Err(format!(
+        "libvlc not available ({last}). {}",
+        crate::platform::vlc_missing_hint()
+    ))
+}
+
 pub struct Engine {
     _lib: Library,
     instance: *mut c_void,
@@ -216,7 +293,7 @@ pub struct Engine {
 unsafe impl Send for Engine {}
 
 impl Engine {
-    pub fn new(silent: bool) -> Result<Self, String> {
+    pub fn new(silent: bool) -> Result<Self, EngineError> {
         unsafe {
             // The system VLC is opened by name, per system: libvlc.so.5 on
             // Linux, libvlc.dll on Windows, libvlc.5.dylib inside VLC.app on
@@ -234,10 +311,13 @@ impl Engine {
                 }
             }
             let Some((lib, lib_path)) = opened else {
-                return Err(format!(
-                    "libvlc not available ({last}). {}",
-                    crate::platform::vlc_missing_hint()
-                ));
+                return Err(EngineError {
+                    missing: true,
+                    detail: format!(
+                        "libvlc not available ({last}). {}",
+                        crate::platform::vlc_missing_hint()
+                    ),
+                });
             };
             let _ = &lib_path;
 
@@ -266,7 +346,7 @@ impl Engine {
             let mut ptrs: Vec<*const c_char> = args.iter().map(|c| c.as_ptr()).collect();
             let instance = vlc_new(ptrs.len() as c_int, ptrs.as_mut_ptr());
             if instance.is_null() {
-                return Err("VLC could not start (libvlc_new returned null)".into());
+                return Err(EngineError::other("VLC could not start (libvlc_new returned null)"));
             }
 
             let guard = LibGuard {
@@ -274,23 +354,23 @@ impl Engine {
                 release: vlc_release,
             };
 
-            let player_new: PlayerNew = *lib.get(b"libvlc_media_player_new\0").map_err(|e| e.to_string())?;
+            let player_new: PlayerNew = *lib.get(b"libvlc_media_player_new\0").map_err(|e| EngineError::other(e.to_string()))?;
             let player_release: PlayerRelease = *lib
                 .get(b"libvlc_media_player_release\0")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EngineError::other(e.to_string()))?;
             let player = player_new(instance);
             if player.is_null() {
-                return Err("VLC could not create a media player".into());
+                return Err(EngineError::other("VLC could not create a media player"));
             }
 
             let frame = Arc::new(FrameBuffer::new());
             let opaque = Arc::into_raw(frame.clone()) as *mut c_void;
             let set_callbacks: SetCallbacks = *lib
                 .get(b"libvlc_video_set_callbacks\0")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EngineError::other(e.to_string()))?;
             let set_format: SetFormat = *lib
                 .get(b"libvlc_video_set_format_callbacks\0")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EngineError::other(e.to_string()))?;
             set_callbacks(player, Some(cb_lock), Some(cb_unlock), Some(cb_display), opaque);
             set_format(player, Some(cb_setup), None);
 
@@ -298,10 +378,10 @@ impl Engine {
 
             let f_output_list: AudioOutputList = *lib
                 .get(b"libvlc_audio_output_list_get\0")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EngineError::other(e.to_string()))?;
             let f_output_release: AudioOutputRelease = *lib
                 .get(b"libvlc_audio_output_list_release\0")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| EngineError::other(e.to_string()))?;
             let mut audio_outputs = Vec::new();
             let list = f_output_list(instance);
             if !list.is_null() {
@@ -326,28 +406,28 @@ impl Engine {
                 path: String::new(),
                 silent,
                 version,
-                f_set_media: *lib.get(b"libvlc_media_player_set_media\0").map_err(|e| e.to_string())?,
-                f_play: *lib.get(b"libvlc_media_player_play\0").map_err(|e| e.to_string())?,
-                f_stop: *lib.get(b"libvlc_media_player_stop\0").map_err(|e| e.to_string())?,
-                f_pause: *lib.get(b"libvlc_media_player_pause\0").map_err(|e| e.to_string())?,
-                f_time: *lib.get(b"libvlc_media_player_get_time\0").map_err(|e| e.to_string())?,
-                f_length: *lib.get(b"libvlc_media_player_get_length\0").map_err(|e| e.to_string())?,
-                f_is_playing: *lib.get(b"libvlc_media_player_is_playing\0").map_err(|e| e.to_string())?,
-                f_state: *lib.get(b"libvlc_media_player_get_state\0").map_err(|e| e.to_string())?,
-                f_set_time: *lib.get(b"libvlc_media_player_set_time\0").map_err(|e| e.to_string())?,
-                f_set_rate: *lib.get(b"libvlc_media_player_set_rate\0").map_err(|e| e.to_string())?,
-                f_get_rate: *lib.get(b"libvlc_media_player_get_rate\0").map_err(|e| e.to_string())?,
-                f_audio_volume: *lib.get(b"libvlc_audio_set_volume\0").map_err(|e| e.to_string())?,
-                f_audio_get_volume: *lib.get(b"libvlc_audio_get_volume\0").map_err(|e| e.to_string())?,
-                f_audio_mute: *lib.get(b"libvlc_audio_set_mute\0").map_err(|e| e.to_string())?,
-                f_audio_tracks: *lib.get(b"libvlc_audio_get_track_description\0").map_err(|e| e.to_string())?,
-                f_video_tracks: *lib.get(b"libvlc_video_get_track_description\0").map_err(|e| e.to_string())?,
-                f_audio_track: *lib.get(b"libvlc_audio_set_track\0").map_err(|e| e.to_string())?,
-                f_video_track: *lib.get(b"libvlc_video_set_track\0").map_err(|e| e.to_string())?,
-                f_track_release: *lib.get(b"libvlc_track_description_list_release\0").map_err(|e| e.to_string())?,
+                f_set_media: *lib.get(b"libvlc_media_player_set_media\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_play: *lib.get(b"libvlc_media_player_play\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_stop: *lib.get(b"libvlc_media_player_stop\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_pause: *lib.get(b"libvlc_media_player_pause\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_time: *lib.get(b"libvlc_media_player_get_time\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_length: *lib.get(b"libvlc_media_player_get_length\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_is_playing: *lib.get(b"libvlc_media_player_is_playing\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_state: *lib.get(b"libvlc_media_player_get_state\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_set_time: *lib.get(b"libvlc_media_player_set_time\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_set_rate: *lib.get(b"libvlc_media_player_set_rate\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_get_rate: *lib.get(b"libvlc_media_player_get_rate\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_audio_volume: *lib.get(b"libvlc_audio_set_volume\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_audio_get_volume: *lib.get(b"libvlc_audio_get_volume\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_audio_mute: *lib.get(b"libvlc_audio_set_mute\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_audio_tracks: *lib.get(b"libvlc_audio_get_track_description\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_video_tracks: *lib.get(b"libvlc_video_get_track_description\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_audio_track: *lib.get(b"libvlc_audio_set_track\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_video_track: *lib.get(b"libvlc_video_set_track\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_track_release: *lib.get(b"libvlc_track_description_list_release\0").map_err(|e| EngineError::other(e.to_string()))?,
                 f_output_list,
                 f_output_release,
-                f_output_set: *lib.get(b"libvlc_audio_output_set\0").map_err(|e| e.to_string())?,
+                f_output_set: *lib.get(b"libvlc_audio_output_set\0").map_err(|e| EngineError::other(e.to_string()))?,
                 f_device_enum: lib
                     .get::<AudioDeviceEnum>(b"libvlc_audio_output_device_enum\0")
                     .map(|s| *s)
@@ -360,9 +440,9 @@ impl Engine {
                     .get::<AudioDeviceSet>(b"libvlc_audio_output_device_set\0")
                     .map(|s| *s)
                     .ok(),
-                f_media_new_path: *lib.get(b"libvlc_media_new_path\0").map_err(|e| e.to_string())?,
-                f_media_new_location: *lib.get(b"libvlc_media_new_location\0").map_err(|e| e.to_string())?,
-                f_media_release: *lib.get(b"libvlc_media_release\0").map_err(|e| e.to_string())?,
+                f_media_new_path: *lib.get(b"libvlc_media_new_path\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_media_new_location: *lib.get(b"libvlc_media_new_location\0").map_err(|e| EngineError::other(e.to_string()))?,
+                f_media_release: *lib.get(b"libvlc_media_release\0").map_err(|e| EngineError::other(e.to_string()))?,
                 player_release,
                 audio_outputs,
                 f_eq_count: lib

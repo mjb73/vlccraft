@@ -17,6 +17,7 @@ mod sidebar;
 mod skin;
 mod theme;
 mod tools;
+mod update;
 mod vlc;
 
 use app::App;
@@ -29,6 +30,9 @@ Usage: vlccraft [FILE|URL ...] [--screenshot FILE.png]
        vlccraft --set-default [--video-only|--music-only]
        vlccraft --restore-default
        vlccraft --default-status
+       vlccraft --check-updates
+       vlccraft --update [--force]
+       vlccraft --vlc-status
 
 Opening a file (or a link) plays it. A file handed over while VLCCraft is
 already open joins that window's queue instead of starting a second player.
@@ -37,6 +41,12 @@ already open joins that window's queue instead of starting a second player.
   --set-default           make VLCCraft the standard player for video and music
   --restore-default       hand video and music back to the earlier player
   --default-status        print which player currently opens video and music
+  --version               print the version of this copy and exit
+  --check-updates         ask GitHub for the newest release and print the answer
+  --update                download and install the newest release, then exit
+  --force                 with --update: install the newest release even when
+                          this copy already carries that number
+  --vlc-status            print whether the VLC engine is installed, and where
 ";
 
 /// Windows only: a windowed program owns no console, so the flags that print
@@ -60,6 +70,7 @@ fn main() -> eframe::Result<()> {
         matches!(
             a.as_str(),
             "-h" | "--help" | "--version" | "--default-status" | "--restore-default"
+                | "--vlc-status"
         ) || a.starts_with("--set-default")
     }) {
         borrow_console();
@@ -68,6 +79,11 @@ fn main() -> eframe::Result<()> {
     let mut screenshot: Option<PathBuf> = None;
     let mut media: Vec<String> = Vec::new();
     let mut action: Option<String> = None;
+    let mut want_version = false;
+    let mut want_check = false;
+    let mut want_update = false;
+    let mut force = false;
+    let mut want_vlc = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -82,14 +98,15 @@ fn main() -> eframe::Result<()> {
             "--music-only" => action = Some("default:audio".into()),
             "--restore-default" => action = Some("restore".into()),
             "--default-status" => action = Some("status".into()),
+            "--check-updates" => want_check = true,
+            "--update" => want_update = true,
+            "--vlc-status" => want_vlc = true,
+            "--force" => force = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return Ok(());
             }
-            "--version" => {
-                println!("VLCCraft {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
+            "--version" => want_version = true,
             _ => {
                 if let Some(rest) = arg.strip_prefix("--screenshot=") {
                     screenshot = Some(PathBuf::from(rest));
@@ -100,6 +117,42 @@ fn main() -> eframe::Result<()> {
                 }
             }
         }
+    }
+
+    // The version, and the two questions about a new release, are answered
+    // without opening a window: useful from a terminal and from a script.
+    if want_version {
+        println!("VLCCraft {}", update::CURRENT);
+        println!(
+            "Rust + egui · {} · updates from {}",
+            crate::platform::os_name(),
+            update::RELEASES_PAGE
+        );
+        return Ok(());
+    }
+    if want_check || want_update {
+        std::process::exit(if want_update {
+            update::cli_update(force)
+        } else {
+            update::cli_check()
+        });
+    }
+    // The installer asks this same question before it finishes, so both the
+    // app and the setup script agree on what "VLC is installed" means.
+    if want_vlc {
+        std::process::exit(match vlc::probe() {
+            Ok(found) => {
+                println!("vlc=present");
+                println!("version={}", found.version);
+                println!("path={}", found.path.display());
+                0
+            }
+            Err(e) => {
+                println!("vlc=missing");
+                println!("hint={e}");
+                3
+            }
+        });
     }
 
     // The small headless commands: useful for a first setup script, and the

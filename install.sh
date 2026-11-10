@@ -1,40 +1,275 @@
 #!/bin/sh
-# Installs VLCCraft for the current user. No root, no system folders.
+# VLCCraft installer for Linux — one file, and it works out where the download is.
 #
-#   ./install.sh              install into ~/.local/bin and add a desktop entry
-#   PREFIX=~/bin ./install.sh install the program somewhere else
+# Three ways to use it, and none of them needs you to be in a particular folder:
+#
+#   sh install.sh                  finds the newest download (beside this script,
+#                                  in ~/Downloads, ~/Desktop, ~/Documents or the
+#                                  current folder); if none is there, fetches the
+#                                  newest release itself, checks its fingerprint
+#                                  and installs it
+#   sh install.sh FILE.tar.gz      install from a download you already have
+#   ./install.sh                   inside an unpacked tarball, the classic way
+#
+# Other uses:
+#   PREFIX=~/bin sh install.sh     put the program somewhere else
+#   sh install.sh --uninstall      remove the program, menu entry and icon
+#   sh install.sh --purge          the same, and also forget library, presets,
+#                                  resume positions and settings
+#
+# No root, no system folders, and nothing of VLC is touched. VLCCraft needs VLC
+# for playback: when it is missing, this script says so in plain words and offers
+# to install it with the distribution's own package manager. Set
+# VLCCRAFT_SKIP_VLC_PROMPT=1 to install without that question (scripts, CI).
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=mjb73/vlccraft
+APP=vlccraft
+
 prefix=${PREFIX:-$HOME/.local/bin}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
+appdata=$data/vlccraft
 
-if [ ! -f "$here/vlccraft" ]; then
-    echo "install.sh must sit next to the vlccraft program" >&2
-    exit 1
+say() { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "$*" >&2; }
+die() { printf '\nvlccraft installer: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+mode=install
+want=
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            sed -n '2,26p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        --uninstall) mode=uninstall ;;
+        --purge) mode=purge ;;
+        -*) die "unknown option: $arg (try --help)" ;;
+        *) want=$arg ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Removing
+# ---------------------------------------------------------------------------
+
+if [ "$mode" != install ]; then
+    removed=0
+    for f in "$prefix/$APP" \
+             "$data/applications/$APP.desktop" \
+             "$data/icons/hicolor/256x256/apps/$APP.png"; do
+        if [ -e "$f" ]; then
+            rm -f -- "$f" && say "removed  $f" && removed=1
+        fi
+    done
+    have update-desktop-database && update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+    if [ "$mode" = purge ]; then
+        if [ -d "$appdata" ]; then
+            rm -rf -- "$appdata" && say "removed  $appdata (library, presets, settings)"
+            removed=1
+        fi
+    elif [ -d "$appdata" ]; then
+        say "kept     $appdata (your library, presets and settings)"
+        say "         run with --purge to remove those too"
+    fi
+    [ "$removed" = 1 ] || say "VLCCraft did not look installed here."
+    say ""
+    say "Done."
+    exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# Finding the program
+# ---------------------------------------------------------------------------
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/vlccraft-install.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+# Newest match first. A tarball, an extracted folder made by a file manager, or
+# a bare program: all three are things a person actually ends up with.
+newest_in() {
+    # $1 = directory, $2 = glob. Prints the newest path, or nothing.
+    [ -d "$1" ] || return 0
+    ls -1t -- "$1"/$2 2>/dev/null | head -1
+}
+
+look_around() {
+    for d in "$here" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/Documents" "$HOME"; do
+        [ -n "$d" ] || continue
+        p=$(newest_in "$d" '*vlccraft*.tar.gz')
+        [ -n "$p" ] && { printf 'tarball %s\n' "$p"; return 0; }
+    done
+    for d in "$here" "$PWD" "$HOME/Downloads" "$HOME/Desktop" "$HOME/Documents"; do
+        [ -n "$d" ] || continue
+        for dir in "$d"/*vlccraft*-linux*; do
+            if [ -x "$dir/$APP" ]; then
+                printf 'folder %s\n' "$dir"
+                return 0
+            fi
+        done
+    done
+    return 0
+}
+
+release_version() {
+    # The tag the release page redirects to. No API key, no rate limit.
+    if have curl; then
+        page=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+            "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
+        case "$page" in
+            */tag/v?*) printf '%s\n' "${page##*/tag/v}" ; return 0 ;;
+        esac
+    fi
+    if have wget; then
+        api=$(wget -qO- "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || true)
+        v=$(printf '%s\n' "$api" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | head -1)
+        [ -n "$v" ] && { printf '%s\n' "$v" ; return 0 ; }
+    fi
+    return 1
+}
+
+fetch() {
+    # $1 = url, $2 = destination
+    if have curl; then
+        curl -fsSL --retry 2 --connect-timeout 20 -o "$2" "$1"
+    elif have wget; then
+        wget -q -O "$2" "$1"
+    else
+        die "this machine has neither curl nor wget, so the download cannot be fetched.
+Download the Linux tarball from https://github.com/$REPO/releases and run:
+  sh install.sh ~/Downloads/vlccraft-VERSION-x86_64-linux.tar.gz"
+    fi
+}
+
+arch=$(uname -m 2>/dev/null || echo unknown)
+case "$arch" in
+    x86_64|amd64) ;;
+    *)
+        # Say so before downloading something that cannot run.
+        die "there is no Linux download for this kind of processor ($arch) yet —
+only 64-bit Intel and AMD machines have one. Everything is at
+https://github.com/$REPO/releases"
+        ;;
+esac
+
+found=
+version=
+srcbin=
+srcdir=
+if [ -n "$want" ]; then
+    [ -e "$want" ] || die "there is no file at $want — check the name and try again"
+    case "$want" in
+        *.tar.gz|*.tgz) found="tarball $want" ;;
+        *)
+            if [ -x "$want" ]; then
+                found="program $want"
+            elif [ -d "$want" ] && [ -x "$want/$APP" ]; then
+                found="folder $want"
+            else
+                die "that is not something this installer can use: $want"
+            fi
+            ;;
+    esac
+elif [ -x "$here/$APP" ]; then
+    found="program $here/$APP"
+else
+    found=$(look_around)
+fi
+
+case "$found" in
+    program\ *)
+        srcbin=${found#program }
+        srcdir=$(CDPATH= cd -- "$(dirname -- "$srcbin")" && pwd || dirname -- "$srcbin")
+        ;;
+    folder\ *)
+        srcdir=${found#folder }
+        ;;
+    tarball\ *)
+        tb=${found#tarball }
+        say "Unpacking $(basename "$tb")…"
+        mkdir -p "$work/x"
+        tar -xzf "$tb" -C "$work/x" || die "that download looks incomplete — download it again from
+https://github.com/$REPO/releases"
+        srcdir=
+        for dir in "$work/x"/*/; do
+            if [ -x "$dir$APP" ]; then srcdir=$dir; break; fi
+        done
+        [ -n "$srcdir" ] || die "the tarball unpacked, but there is no program inside it.
+Download it again from https://github.com/$REPO/releases"
+        ;;
+    *)
+        # Nothing on this machine: fetch the newest release.
+        say "No download found here, so fetching the newest VLCCraft…"
+        version=$(release_version) || die "could not reach GitHub to find the newest version.
+Check the connection, or download the Linux tarball from
+https://github.com/$REPO/releases and run:
+  sh install.sh ~/Downloads/vlccraft-VERSION-x86_64-linux.tar.gz"
+        asset="vlccraft-$version-x86_64-linux.tar.gz"
+        base="https://github.com/$REPO/releases/download/v$version"
+        say "Downloading VLCCraft $version…"
+        fetch "$base/$asset" "$work/$asset" || die "the download failed.
+Try the release page in a browser: https://github.com/$REPO/releases"
+        if fetch "$base/$asset.sha256" "$work/$asset.sha256" 2>/dev/null; then
+            want_sum=$(sed -n '1s/[[:space:]].*//p' "$work/$asset.sha256")
+            if have sha256sum; then
+                got_sum=$(sha256sum "$work/$asset" | sed -n '1s/[[:space:]].*//p')
+            elif have shasum; then
+                got_sum=$(shasum -a 256 "$work/$asset" | sed -n '1s/[[:space:]].*//p')
+            else
+                got_sum=
+            fi
+            if [ -n "$got_sum" ] && [ "$got_sum" != "$want_sum" ]; then
+                die "the download does not match its published fingerprint, so it was not installed.
+Try again, or download it in a browser from https://github.com/$REPO/releases"
+            fi
+            [ -n "$got_sum" ] && say "Fingerprint matches."
+        fi
+        say "Unpacking…"
+        mkdir -p "$work/x"
+        tar -xzf "$work/$asset" -C "$work/x" || die "the download looks incomplete — try again"
+        srcdir=
+        for dir in "$work/x"/*/; do
+            if [ -x "$dir$APP" ]; then srcdir=$dir; break; fi
+        done
+        [ -n "$srcdir" ] || die "the download unpacked, but there is no program inside it"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Installing
+# ---------------------------------------------------------------------------
 
 mkdir -p "$prefix" "$data/applications" "$data/icons/hicolor/256x256/apps"
-install -m 755 "$here/vlccraft" "$prefix/vlccraft"
-echo "program:  $prefix/vlccraft"
 
-if [ -f "$here/vlccraft.png" ]; then
-    install -m 644 "$here/vlccraft.png" "$data/icons/hicolor/256x256/apps/vlccraft.png"
-    echo "icon:     $data/icons/hicolor/256x256/apps/vlccraft.png"
+# Copy beside the target and rename, so replacing a copy that is running right
+# now works: the old program keeps its own file until it is closed.
+tmp="$prefix/.$APP.new.$$"
+cp -- "${srcbin:-$srcdir/$APP}" "$tmp"
+chmod 755 "$tmp"
+mv -f -- "$tmp" "$prefix/$APP"
+chmod 755 "$prefix/$APP"
+say "Program   $prefix/$APP"
+
+if [ -f "$srcdir/vlccraft.png" ]; then
+    cp -- "$srcdir/vlccraft.png" "$data/icons/hicolor/256x256/apps/$APP.png"
+    chmod 644 "$data/icons/hicolor/256x256/apps/$APP.png" "$data/icons/hicolor/256x256/apps/$APP.png"
+    say "Icon      $data/icons/hicolor/256x256/apps/$APP.png"
 fi
 
-# The entry is written here rather than copied so a PREFIX outside the home
-# folder still produces a working launcher.
-cat > "$data/applications/vlccraft.desktop" <<EOF
+# Written here rather than copied, so a PREFIX outside the home folder still
+# produces a working launcher.
+cat > "$data/applications/$APP.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.5
 Name=VLCCraft
 GenericName=Media Player
 Comment=A calm skin over the player already installed on this machine
-Exec="$prefix/vlccraft" %F
-TryExec=$prefix/vlccraft
-Icon=vlccraft
+Exec="$prefix/$APP" %F
+TryExec=$prefix/$APP
+Icon=$APP
 Terminal=false
 Categories=AudioVideo;Player;Video;Audio;
 MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;video/mpeg;video/ogg;video/x-flv;video/x-ms-wmv;video/mp2t;video/3gpp;video/x-m4v;application/vnd.apple.mpegurl;application/x-mpegurl;audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/opus;audio/x-wav;audio/mp4;audio/x-m4a;audio/aac;audio/x-ms-wma;audio/x-aiff;
@@ -43,13 +278,113 @@ StartupWMClass=vlccraft
 Keywords=video;audio;movie;music;player;media;subtitle;
 EOF
 
-command -v update-desktop-database >/dev/null 2>&1 &&
-    update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+have update-desktop-database && update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+say "Menu      $data/applications/$APP.desktop"
 
-echo "entry:    $data/applications/vlccraft.desktop"
-echo
-echo "VLCCraft needs VLC installed — it uses VLC's engine and bundles none of it."
-case ":$PATH:" in
-    *":$prefix:"*) echo "Start it from your applications menu, or type: vlccraft" ;;
-    *) echo "Add $prefix to PATH, then start VLCCraft from your applications menu." ;;
+# Does the program this machine now holds actually start here? A download built
+# for a newer system than this one fails exactly here, and that is worth knowing
+# now rather than on the first double-click.
+installed_version=
+if installed_version=$("$prefix/$APP" --version 2>/dev/null); then
+    say ""
+    say "Installed $installed_version."
+else
+    die "the program was copied, but it will not start on this system.
+This usually means the system is too old for the download. The release page has
+a Debian/Ubuntu package and source instructions:
+https://github.com/$REPO/releases"
+fi
+
+# ---------------------------------------------------------------------------
+# VLC
+#
+# The player is a front end; the engine is VLC, and none of it is bundled. If
+# VLC is missing, ask before touching the system, offer the command this
+# distribution actually uses, and never fail the install when the answer is no.
+# ---------------------------------------------------------------------------
+
+vlc_present() {
+    "$prefix/$APP" --vlc-status >/dev/null 2>&1 && return 0
+    command -v vlc >/dev/null 2>&1 && return 0
+    command -v ldconfig >/dev/null 2>&1 &&
+        ldconfig -p 2>/dev/null | grep -q 'libvlc\.so' && return 0
+    return 1
+}
+
+vlc_command() {
+    [ -r /etc/os-release ] || return 0
+    # shellcheck disable=SC1091
+    . /etc/os-release 2>/dev/null || true
+    case " ${ID:-} ${ID_LIKE:-} " in
+        *arch*|*manjaro*) echo "sudo pacman -S vlc" ;;
+        *fedora*|*rhel*|*centos*) echo "sudo dnf install vlc" ;;
+        *suse*) echo "sudo zypper install vlc" ;;
+        *alpine*) echo "sudo apk add vlc" ;;
+        *debian*|*ubuntu*|*mint*|*pop*|*elementary*) echo "sudo apt install vlc" ;;
+    esac
+}
+
+if vlc_present; then
+    say "VLC       found — playback is ready."
+else
+    say ""
+    say "VLC is not installed yet."
+    say "VLCCraft needs VLC: VLC is what decodes and plays; VLCCraft draws the"
+    say "interface and bundles none of it. Download: https://www.videolan.org/vlc/"
+    cmd=$(vlc_command)
+    [ -n "$cmd" ] && say "Or run:   $cmd"
+    say ""
+    # A piped install has no terminal to answer with — stdin is the script
+    # itself — so the question is only asked when there is someone there.
+    if [ "${VLCCRAFT_SKIP_VLC_PROMPT:-}" = "1" ] || [ ! -t 0 ]; then
+        say "Install VLC when you can, then start VLCCraft again."
+    else
+        printf "Install VLC now? [Y/n] "
+        read -r answer || answer=
+        case "$answer" in
+            n|N|no|No|NO)
+                say "Skipped. Playback begins once VLC is installed."
+                ;;
+            *)
+                if [ -n "$cmd" ]; then
+                    say "Running: $cmd"
+                    # Word-split on purpose: the command carries its own arguments.
+                    # shellcheck disable=SC2086
+                    if $cmd; then
+                        if vlc_present; then
+                            say "VLC       installed — playback is ready."
+                        else
+                            say "VLC was installed but its engine is not visible yet."
+                            say "Start VLCCraft; it will look again."
+                        fi
+                    else
+                        say "That did not finish. Install VLC from https://www.videolan.org/vlc/"
+                        say "and start VLCCraft again."
+                    fi
+                else
+                    say "No package manager was recognised."
+                    say "Install VLC from https://www.videolan.org/vlc/ and start VLCCraft again."
+                fi
+                ;;
+        esac
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# How to start it
+# ---------------------------------------------------------------------------
+
+say ""
+case ":${PATH:-}:" in
+    *":$prefix:"*)
+        say "Start VLCCraft from your applications menu, or type: vlccraft"
+        ;;
+    *)
+        say "Start VLCCraft from your applications menu."
+        say "To also start it by typing vlccraft, add this folder to your PATH:"
+        case "${SHELL:-}" in
+            *fish*) say "  fish_add_path $prefix" ;;
+            *)      say "  for bash or zsh, add to ~/.profile:  export PATH=\"$prefix:\$PATH\"" ;;
+        esac
+        ;;
 esac

@@ -63,11 +63,14 @@ impl App {
                             self.section = crate::app::Section::Home;
                         }
                         ui.add_space(4.0);
-                        let status = self
-                            .libvlc_version
-                            .clone()
-                            .unwrap_or_else(|| "libvlc not found".into());
-                        let label = format!("VLC {}", status.split(' ').next().unwrap_or(&status));
+                        let label = match &self.libvlc_version {
+                            Some(status) => {
+                                format!("VLC {}", status.split(' ').next().unwrap_or(status))
+                            }
+                            // The bare library name is not an answer a person
+                            // can use; say what it means.
+                            None => "VLC not found".to_string(),
+                        };
                         ui.label(
                             egui::RichText::new(label)
                                 .size(10.5)
@@ -321,6 +324,14 @@ impl App {
             }
         });
         ui.menu_button("Tools", |ui| {
+            if self.vlc_missing {
+                if ui.button("Set up VLC…").clicked() {
+                    self.dlg_msg = None;
+                    self.dialog = Some(Dialog::VlcMissing);
+                    ui.close();
+                }
+                ui.separator();
+            }
             if ui.button("Convert to a new file…").clicked() {
                 self.open_convert_dialog();
                 ui.close();
@@ -357,7 +368,22 @@ impl App {
                 self.refresh_defaults();
                 ui.close();
             }
-            if ui.button("About VLCCraft").clicked() {
+            ui.separator();
+            // The update question lives one click away, and asks again when
+            // the answer is already on screen, so a stale answer never looks
+            // like a fresh one.
+            let update_label = match &self.updates {
+                crate::app::UpdateState::Newer { release } => {
+                    format!("Update to {}…", release.version)
+                }
+                _ => "Check for updates…".to_string(),
+            };
+            if ui.button(update_label).clicked() {
+                self.dialog = Some(Dialog::About);
+                self.check_for_updates();
+                ui.close();
+            }
+            if ui.button(format!("About VLCCraft {}", self.version())).clicked() {
                 self.dialog = Some(Dialog::About);
                 ui.close();
             }
@@ -653,7 +679,54 @@ impl App {
             }
         }
 
-        if let Some(engine) = &self.engine_error {
+        if self.vlc_missing {
+            // A card rather than a red sentence: the person can fix this from
+            // here, so it gets a button that opens the setup steps.
+            let card = Rect::from_center_size(rect.center(), vec2(360.0, 132.0));
+            painter.rect_filled(card, CornerRadius::same(12), p.panel);
+            painter.rect_stroke(
+                card,
+                CornerRadius::same(12),
+                Stroke::new(1.0, p.line),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                card.center() - vec2(0.0, 32.0),
+                Align2::CENTER_CENTER,
+                "Playback needs VLC",
+                skin::font(15.5),
+                p.text,
+            );
+            painter.text(
+                card.center() - vec2(0.0, 8.0),
+                Align2::CENTER_CENTER,
+                "Install it once; everything else already works.",
+                skin::font(10.5),
+                p.dim,
+            );
+            let btn = Rect::from_center_size(card.center() + vec2(0.0, 32.0), vec2(148.0, 31.0));
+            let resp = ui.interact(btn, Id::new("vlc-setup-button"), Sense::click());
+            let fill = if resp.hovered() {
+                p.accent.gamma_multiply(1.12)
+            } else {
+                p.accent
+            };
+            painter.rect_filled(btn, CornerRadius::same(7), fill);
+            painter.text(
+                btn.center(),
+                Align2::CENTER_CENTER,
+                "How to install",
+                skin::font(12.0),
+                if p.light {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(20, 12, 6)
+                },
+            );
+            if resp.clicked() {
+                self.dialog = Some(crate::app::Dialog::VlcMissing);
+            }
+        } else if let Some(engine) = &self.engine_error {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,

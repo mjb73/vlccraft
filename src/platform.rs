@@ -124,6 +124,74 @@ pub fn vlc_library_candidates() -> Vec<PathBuf> {
     out
 }
 
+/// The page a person is sent to when VLC has to be installed by hand.
+pub fn vlc_download_url() -> &'static str {
+    "https://www.videolan.org/vlc/"
+}
+
+/// The name of the library, for the "what was looked for" line.
+pub fn vlc_library_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "libvlc.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libvlc inside VLC.app"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "libvlc.so.5"
+    }
+}
+
+/// How this computer installs VLC, when there is a package manager to ask.
+///
+/// Detected from `/etc/os-release` rather than guessed, so the command in the
+/// setup card is one that actually exists on the machine in front of the person.
+pub fn vlc_install_command() -> Option<&'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let mut id = String::new();
+        let mut like = String::new();
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("ID=") {
+                id = v.trim_matches('"').to_lowercase();
+            } else if let Some(v) = line.strip_prefix("ID_LIKE=") {
+                like = v.trim_matches('"').to_lowercase();
+            }
+        }
+        let family = format!("{id} {like}");
+        if family.contains("arch") || family.contains("manjaro") {
+            Some("sudo pacman -S vlc")
+        } else if family.contains("fedora") || family.contains("rhel") || family.contains("centos") {
+            Some("sudo dnf install vlc")
+        } else if family.contains("suse") {
+            Some("sudo zypper install vlc")
+        } else if family.contains("alpine") {
+            Some("sudo apk add vlc")
+        } else if family.contains("debian")
+            || family.contains("ubuntu")
+            || family.contains("mint")
+            || family.contains("pop")
+            || family.contains("elementary")
+        {
+            Some("sudo apt install vlc")
+        } else {
+            None
+        }
+    }
+}
+
 /// What to tell the person when the library could not be opened.
 pub fn vlc_missing_hint() -> &'static str {
     #[cfg(target_os = "windows")]

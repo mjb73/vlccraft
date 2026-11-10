@@ -43,21 +43,70 @@ screens and clearer words.
   by name or synonym, and an explanation next to every switch.
 - **Bookmarks on a timeline.** The bookmark key adds one immediately, and the
   sidebar shows bookmarks and chapters on the same line as the film.
+- **A version you can see, and updates that arrive from the release page.**
+  The number is on the About card and in Settings; a newer release is noticed
+  once a day, downloaded, checked against its published fingerprint and put in
+  place, with a restart to finish.
 
 ## Install
 
-You need VLC installed — VLCCraft uses its engine.
+VLCCraft needs VLC: it draws the interface, and the VLC installed on the
+machine does the decoding. Nothing of VLC is bundled, so playback waits until it
+is present — the library, playlists and settings work regardless.
 
-**Linux** — the tarball, or the `.deb`:
+If VLC is missing, the app opens a setup card that says so in plain words, shows
+the install command for this distribution (or the download page on Windows and
+macOS), and has a **Check again** button that finds a freshly installed VLC
+without a restart. The same card is reachable from the player, the library
+notice and Settings.
+
+`vlccraft --vlc-status` answers the same question the player asks: it prints
+`vlc=present` with the engine's version and path, or `vlc=missing` and exits 3,
+so a script or an installer can check without opening a window.
+
+**Linux (64-bit Intel or AMD)** — two ways, both ending with VLCCraft in your
+applications menu.
+
+*Copy one line into a terminal.* It works in fish, bash and zsh; it fetches the
+newest version, checks its fingerprint, and installs it. No root, nothing in
+system folders:
 
 ```sh
-tar -xzf vlccraft-1.0.0-x86_64-linux.tar.gz
-./vlccraft-1.0.0-x86_64-linux/install.sh
+curl -fsSL https://github.com/mjb73/vlccraft/releases/latest/download/install.sh -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
 ```
 
-The installer copies the program into `~/.local/bin`, adds an ordinary desktop
-entry and icon, and can then hand double-clicked video and music files over
-(Settings → General → Default player).
+*Or download it in a browser.* Click `vlccraft-1.0.1-x86_64-linux.tar.gz` on the
+[releases page](https://github.com/mjb73/vlccraft/releases); it lands in your
+**Downloads** folder. Then run these three lines in a terminal, one after
+another. The `cd` is the part that matters: a fresh terminal starts in your home
+folder, and the download is in Downloads.
+
+```sh
+cd ~/Downloads
+tar -xzf vlccraft-1.0.1-x86_64-linux.tar.gz
+sh vlccraft-1.0.1-x86_64-linux/install.sh
+```
+
+If a command answers `Cannot open: No such file or directory`, the file is not
+in the folder the terminal is in. `ls ~/Downloads` shows what is there; the
+name must match exactly, including the version number. The same holds for the
+`Unknown command` that follows it: it means the unpacking never happened.
+
+The installer copies the program into `~/.local/bin`, adds a menu entry and
+icon, and prints where each went. It then starts the copy it just wrote, so a
+download built for a newer system than yours fails there in plain words instead
+of on your first double-click. Before finishing it checks for VLC: if that is
+missing, it offers the command your distribution uses and continues cleanly when
+the answer is no (set `VLCCRAFT_SKIP_VLC_PROMPT=1` to skip the question in a
+scripted install). The `.deb` declares VLC as a dependency, so `apt` offers it
+along with the player.
+
+To start it by typing `vlccraft` as well as from the menu, put `~/.local/bin` on
+your PATH — fish: `fish_add_path ~/.local/bin`; bash or zsh: add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.profile`.
+
+`sh install.sh --uninstall` removes the program, the menu entry and the icon and
+keeps your library, presets and settings; `--purge` removes those too.
 
 **macOS** — open the `.dmg` and drag VLCCraft to Applications. The one download
 carries both Apple-silicon and Intel code, so it runs natively on either Mac. The
@@ -72,13 +121,66 @@ Every release carries one download per system, on the
 
 | System | File | Install |
 |---|---|---|
-| Linux (x86_64) | `vlccraft-<version>-x86_64-linux.tar.gz` or `vlccraft_<version>_amd64.deb` | `install.sh` inside the tarball, or `sudo apt install ./vlccraft_*.deb` |
+| Linux (x86_64) | `vlccraft-<version>-x86_64-linux.tar.gz`, `install.sh` (the same installer, on its own) or `vlccraft_<version>_amd64.deb` | the one-line command above, or `sh install.sh`, or `sudo apt install ./vlccraft_<version>_amd64.deb` |
 | macOS (universal) | `VLCCraft-<version>.dmg` | drag to Applications |
 | Windows (x64) | `vlccraft-<version>-windows-x64.zip` | unzip and run |
 
 Each file has a `.sha256` beside it. The build for all three runs on GitHub's
 machines from the tagged source, so what you download is the code in this
 repository, not a binary someone carried here.
+
+## Version and updates
+
+The number this copy carries is written in one place, `Cargo.toml`, and shown in
+three: the window title, **Tools → About VLCCraft**, and **Settings → General**.
+`vlccraft --version` prints it in a terminal.
+
+VLCCraft updates from its own [releases page](https://github.com/mjb73/vlccraft/releases),
+not from a package manager:
+
+- **The check.** Once a day, the first time VLCCraft starts, it asks GitHub for
+  the newest release. The answer is compared with the number compiled into the
+  build. A newer release puts a small notice on screen — once — and the About
+  card says what is available, on which date, and what changed. The switch for
+  this is in Settings → General, and **Tools → Check for updates…** asks
+  immediately.
+- **The download.** The file for this system is fetched into
+  `~/.local/share/vlccraft/updates` (Windows: `%LOCALAPPDATA%\vlccraft\updates`),
+  with a bar and a size that counts up. Linux gets the tarball, Windows the zip,
+  macOS the disk image.
+- **The check on the file.** The download is hashed and compared with the
+  `.sha256` published beside it. A mismatch stops the update and says so; no
+  fingerprint published means no fingerprint to compare, which is also said.
+- **The install.** Linux and Windows: the new program is unpacked and renamed
+  over the old one, so the running copy keeps working until it is restarted.
+  macOS: the disk image is opened, because an app inside a bundle cannot replace
+  itself while it runs — drag VLCCraft to Applications.
+- **What is never touched.** Your library index, resume positions, presets,
+  playlists, bookmarks and settings live in `~/.local/share/vlccraft` and stay
+  there. VLC's own files are never read or written.
+
+The same three steps are available without the window, for a script or a
+machine you reach over a network:
+
+```sh
+vlccraft --check-updates        # current number, newest release, which file
+vlccraft --update               # download, check and install the newest release
+vlccraft --update --force       # reinstall the newest release regardless
+```
+
+`--check-updates` exits 1 when GitHub cannot be reached, so a script can tell
+"newer" from "unknown" instead of guessing.
+
+## Making a release
+
+1. Bump `version` in `Cargo.toml` (semantic versioning: 1.0.0 → 1.1.0 for a
+   feature, → 1.0.1 for a fix).
+2. Commit, then tag with the same number: `git tag v1.1.0 && git push origin v1.1.0`.
+3. The Release workflow refuses a tag that disagrees with `Cargo.toml`, then
+   builds Linux, macOS (universal) and Windows from the tagged source, packs
+   them, writes a `.sha256` per file and publishes the release.
+
+That release becomes the answer to every copy's update check within a day.
 
 ## Build from source
 
@@ -96,12 +198,16 @@ vlccraft [FILE|URL ...] [--screenshot FILE.png]
 vlccraft --set-default [--video-only|--music-only]
 vlccraft --restore-default
 vlccraft --default-status
+vlccraft --version
+vlccraft --check-updates
+vlccraft --update [--force]
 ```
 
 A file handed to the program while a window is already open joins that window's
 queue instead of starting a second player. `--screenshot` draws the window
 120 frames, saves it as a PNG and exits without taking focus — that is how the
-interface is checked after every build.
+interface is checked after every build. `--version`, `--check-updates` and
+`--update` print and exit without opening a window.
 
 ## Licence
 

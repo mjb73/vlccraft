@@ -1,6 +1,6 @@
 [package]
 name = "vlccraft"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "VLCCraft — a calm skin over the VLC you already have"
 license = "MIT"

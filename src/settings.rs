@@ -126,8 +126,14 @@ impl App {
                         }
                     });
                 }
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                let mut scroller = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                // A picture of a page further down than the window's fold.
+                if let Ok(offset) = std::env::var("VLCCRAFT_SHOT_SCROLL") {
+                    if let Ok(px) = offset.parse::<f32>() {
+                        scroller = scroller.vertical_scroll_offset(px);
+                    }
+                }
+                scroller
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(pad);
@@ -298,11 +304,31 @@ impl App {
             self.touch();
         }
 
+        skin::section(ui, "Version and updates", p);
+
         setting(
             ui,
             p,
-            "Check for updates",
-            "Asks the package manager. VLC's own files are never replaced.",
+            "Version",
+            "The number this copy carries. Newer releases are published on the GitHub release page.",
+            |ui| {
+                ui.label(
+                    egui::RichText::new(format!("VLCCraft {}", crate::update::CURRENT))
+                        .size(11.0)
+                        .color(p.muted)
+                        .monospace(),
+                );
+            },
+        );
+
+        self.update_card(ui, p);
+        ui.add_space(12.0);
+
+        setting(
+            ui,
+            p,
+            "Check for a new release when VLCCraft starts",
+            "Asks GitHub once a day, in the background. Your library and watching habits are never sent, and VLC's own files are never replaced.",
             |ui| {
                 let mut check = self.settings.check_updates;
                 if skin::toggle(ui, &mut check, p).changed() {
@@ -1323,12 +1349,20 @@ impl App {
             "Player",
             "The engine is the system libvlc. The skin adds no decoding thread of its own.",
             |ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(version).size(10.4).color(p.muted).monospace(),
-                    )
-                    .wrap(),
-                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(version).size(10.4).color(p.muted).monospace(),
+                        )
+                        .wrap(),
+                    );
+                    if self.vlc_missing
+                        && skin::ghost(ui, "Install VLC…", p).clicked()
+                    {
+                        self.dlg_msg = None;
+                        self.dialog = Some(crate::app::Dialog::VlcMissing);
+                    }
+                });
             },
         );
     }
@@ -1784,7 +1818,14 @@ fn setting_index(cat: SettingsCategory) -> Vec<(&'static str, &'static str)> {
         SettingsCategory::General => vec![
             ("Default player", "standard default media association xdg mime double click open files video music"),
             ("Start page", "startup home opening"),
-            ("Check for updates", "version package"),
+            (
+                "Version",
+                "version number release github update download install newest",
+            ),
+            (
+                "Check for a new release when VLCCraft starts",
+                "update automatic github release",
+            ),
             ("Show the welcome tour again", "onboarding first run"),
             ("Save settings on change", "persistence atomic"),
         ],

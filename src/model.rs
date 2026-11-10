@@ -142,6 +142,11 @@ pub struct Settings {
     pub plugins_readonly: bool,
     pub relink_prompt: bool,
     pub check_updates: bool,
+    /// When GitHub was last asked for the newest release (unix ms; 0 = never).
+    pub update_checked_ms: u64,
+    /// A release the person answered "later" to, so the notice stays quiet
+    /// until a newer one appears.
+    pub update_skipped: String,
     pub save_metadata_beside_media: bool,
     pub watched_threshold: u8,
     pub recording_dir: String,
@@ -218,6 +223,8 @@ impl Default for Settings {
             plugins_readonly: true,
             relink_prompt: true,
             check_updates: true,
+            update_checked_ms: 0,
+            update_skipped: String::new(),
             save_metadata_beside_media: false,
             watched_threshold: 92,
             recording_dir: String::new(),
@@ -1066,5 +1073,28 @@ mod tests {
         assert!(on.auto_advance);
         let fresh: Settings = serde_json::from_str("{}").unwrap();
         assert!(fresh.auto_advance, "a new install plays the queue on its own");
+    }
+
+    #[test]
+    fn settings_written_before_the_updater_existed_still_load() {
+        // A file from 1.0.0 has no update keys. It must keep every value it
+        // does carry, and pick up the new fields from their defaults — a
+        // configuration is never thrown away because a build got newer.
+        let old = r#"{"theme":"Midnight","check_updates":false,"volume":42,"schema_version":2}"#;
+        let loaded: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(loaded.volume, 42);
+        assert!(!loaded.check_updates, "the switch the person set is kept");
+        assert_eq!(loaded.update_checked_ms, 0, "never checked");
+        assert!(loaded.update_skipped.is_empty());
+
+        // And a round trip keeps what the updater writes down.
+        let mut settings = loaded;
+        settings.update_checked_ms = 1_700_000_000_000;
+        settings.update_skipped = "1.1.0".into();
+        let text = serde_json::to_string(&settings).unwrap();
+        let again: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(again.update_checked_ms, 1_700_000_000_000);
+        assert_eq!(again.update_skipped, "1.1.0");
+        assert_eq!(again.volume, 42);
     }
 }

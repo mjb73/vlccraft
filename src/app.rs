@@ -131,6 +131,8 @@ pub enum Dialog {
     Relink(String),
     About,
     Onboarding,
+    /// VLC is not installed: the setup card that says what to do about it.
+    VlcMissing,
 }
 
 pub struct Now {
@@ -189,6 +191,50 @@ pub struct ShotJob {
     pub saved: bool,
 }
 
+/// What is known about newer releases at this moment. One value, so the card
+/// in About, the line in Settings and the menu label can never disagree.
+#[derive(Clone, Debug)]
+pub enum UpdateState {
+    /// Nobody has asked yet.
+    Idle,
+    Checking,
+    /// The newest published release carries this build's number.
+    Newest { release: crate::update::Release },
+    /// A newer release is published.
+    Newer { release: crate::update::Release },
+    /// This build is newer than anything published — a build from source.
+    Ahead { release: crate::update::Release },
+    /// GitHub could not be reached, or answered something unusable.
+    Unreachable { reason: String },
+}
+
+/// A release that was downloaded and put in place, waiting for a restart.
+#[derive(Clone, Debug)]
+pub struct UpdateInstalled {
+    pub version: String,
+    pub path: PathBuf,
+    /// macOS: a disk image was opened for the person to drag across.
+    pub opened: bool,
+}
+
+/// One line from the worker that talks to GitHub.
+pub enum UpdateMsg {
+    Answer(Result<crate::update::Release, String>),
+    Progress {
+        ratio: f64,
+        done: u64,
+        total: u64,
+        stage: String,
+    },
+    Installed {
+        version: String,
+        path: PathBuf,
+        opened: bool,
+    },
+    Failed(String),
+}
+
+
 pub struct App {
     pub settings: Settings,
     pub store: Store,
@@ -200,6 +246,9 @@ pub struct App {
 
     pub engine: Option<Engine>,
     pub engine_error: Option<String>,
+    /// VLC itself was not found (rather than found but unusable), which is the
+    /// case the setup card exists for.
+    pub vlc_missing: bool,
     pub libvlc_version: Option<String>,
 
     pub now: Option<Now>,
@@ -224,6 +273,10 @@ pub struct App {
     pub dlg_sel: Vec<String>,
     pub dlg_msg: Option<String>,
     pub browse_dir: String,
+    /// What the file chooser has highlighted, and how it is narrowed down.
+    pub browse_sel: Option<String>,
+    pub browse_filter: String,
+    pub browse_typing: bool,
 
     pub popup: Option<Popup>,
     pub popup_anchor: Pos2,
@@ -315,6 +368,19 @@ pub struct App {
 
     /// Files handed over by a second launch while this window is open.
     pub open_inbox: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+
+    /// The version number and the way a new release arrives: what GitHub last
+    /// said, the worker that asked, and how far a download has come.
+    pub updates: UpdateState,
+    pub update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
+    pub update_busy: bool,
+    pub update_progress: Option<f64>,
+    pub update_done_bytes: u64,
+    pub update_total_bytes: u64,
+    pub update_stage: String,
+    pub update_installed: Option<UpdateInstalled>,
+    /// The "a newer release is published" notice appears once a session.
+    pub update_announced: bool,
 }
 
 pub enum UrlProbe {
@@ -476,12 +542,25 @@ impl App {
 
         cc.egui_ctx.set_visuals(cc.egui_ctx.style().visuals.clone());
 
-        let (engine, engine_error, version) = match Engine::new(shot_mode) {
-            Ok(engine) => {
-                let v = engine.version().to_string();
-                (Some(engine), None, Some(v))
+        // A missing VLC is not an accident to apologise for: it is a setup
+        // step, so it gets its own card. The environment switch lets that card
+        // be drawn and tested on a machine that does have VLC.
+        let forced_missing = std::env::var("VLCCRAFT_FORCE_MISSING_VLC").as_deref() == Ok("1");
+        let (engine, engine_error, version, vlc_missing) = if forced_missing {
+            (
+                None,
+                Some(crate::platform::vlc_missing_hint().to_string()),
+                None,
+                true,
+            )
+        } else {
+            match Engine::new(shot_mode) {
+                Ok(engine) => {
+                    let v = engine.version().to_string();
+                    (Some(engine), None, Some(v), false)
+                }
+                Err(e) => (None, Some(e.detail), None, e.missing),
             }
-            Err(e) => (None, Some(e), None),
         };
 
         let mut app = App {
@@ -494,6 +573,7 @@ impl App {
             queue,
             engine,
             engine_error,
+            vlc_missing,
             libvlc_version: version,
             now: None,
             view: View::Library,
@@ -515,6 +595,9 @@ impl App {
             dlg_sel: Vec::new(),
             dlg_msg: None,
             browse_dir: crate::platform::browse_start().to_string_lossy().to_string(),
+            browse_sel: None,
+            browse_filter: String::new(),
+            browse_typing: false,
             popup: None,
             popup_anchor: Pos2::ZERO,
             popup_rect: egui::Rect::NOTHING,
@@ -570,7 +653,7 @@ impl App {
             ended_handled: false,
             finished: false,
             pending_seek: None,
-            window_title: "VLCCraft".into(),
+            window_title: format!("VLCCraft {}", crate::update::CURRENT),
             toast_seq: 0,
             url_probe: None,
             url_probe_url: String::new(),
@@ -580,10 +663,68 @@ impl App {
             defaults_checked: -99.0,
             defaults_msg: None,
             open_inbox,
+            updates: UpdateState::Idle,
+            update_rx: None,
+            update_busy: false,
+            update_progress: None,
+            update_done_bytes: 0,
+            update_total_bytes: 0,
+            update_stage: String::new(),
+            update_installed: None,
+            update_announced: false,
         };
 
         // A quiet, useful first run: onboarding once, library ready.
         app.sidebar_open = app.settings.sidebar_open;
+
+        // Once a day, and only when that is switched on, ask GitHub whether a
+        // newer release exists. A picture run stays off the network unless it
+        // is asked for, so a check never depends on what is published.
+        let due = app.settings.check_updates
+            && (app.settings.update_checked_ms == 0
+                || now_ms().saturating_sub(app.settings.update_checked_ms) > 86_400_000);
+        let shot_asks = std::env::var("VLCCRAFT_SHOT_UPDATE").as_deref() == Ok("check");
+        if (app.shot.is_none() && due) || (app.shot.is_some() && shot_asks) {
+            app.check_for_updates();
+            cc.egui_ctx.request_repaint();
+        }
+        // A picture of the "newer release" card, when no release happens to be
+        // newer that day. The stand-in never reaches a window someone uses.
+        if app.shot.is_some() {
+            match std::env::var("VLCCRAFT_SHOT_UPDATE").as_deref() {
+                Ok("preview") => {
+                    app.updates = UpdateState::Newer {
+                        release: crate::update::preview_release(),
+                    };
+                    app.settings.update_checked_ms = now_ms();
+                }
+                // The two states a download passes through, drawn without a
+                // download so the card can be looked at.
+                Ok("progress") => {
+                    app.updates = UpdateState::Newer {
+                        release: crate::update::preview_release(),
+                    };
+                    app.settings.update_checked_ms = now_ms();
+                    app.update_progress = Some(0.42);
+                    app.update_done_bytes = 3_081_004;
+                    app.update_total_bytes = 7_335_725;
+                    app.update_stage = "Downloading".into();
+                    app.update_busy = true;
+                }
+                Ok("installed") => {
+                    app.updates = UpdateState::Newer {
+                        release: crate::update::preview_release(),
+                    };
+                    app.settings.update_checked_ms = now_ms();
+                    app.update_installed = Some(UpdateInstalled {
+                        version: "1.1.0".into(),
+                        path: std::path::PathBuf::from("/home/you/.local/bin/vlccraft"),
+                        opened: false,
+                    });
+                }
+                _ => {}
+            }
+        }
 
         if let Some(shot) = &app.shot {
             let _ = shot;
@@ -616,7 +757,11 @@ impl App {
                 }
             }
         } else {
-            if !app.settings.onboarding_done {
+            // A missing VLC comes before everything else: nothing else in the
+            // first run matters if pressing play cannot produce a picture.
+            if app.vlc_missing {
+                app.dialog = Some(Dialog::VlcMissing);
+            } else if !app.settings.onboarding_done {
                 app.dialog = Some(Dialog::Onboarding);
             }
             app.save_library();
@@ -626,6 +771,17 @@ impl App {
             if !open_paths.is_empty() {
                 app.open_from_shell(open_paths);
             }
+        }
+        // A plain picture run (no view requested) on a machine without VLC is
+        // exactly a first run, so it shows the setup card the person would get.
+        if app.shot.is_some()
+            && app.vlc_missing
+            && app.dialog.is_none()
+            && std::env::var("VLCCRAFT_SHOT_VIEW")
+                .map(|v| v.is_empty())
+                .unwrap_or(true)
+        {
+            app.dialog = Some(Dialog::VlcMissing);
         }
         app
     }
@@ -746,6 +902,14 @@ impl App {
                     self.dlg_text.clear();
                     self.dialog = Some(Dialog::OpenFolder);
                 }
+                "openfile" => {
+                    self.dlg_text.clear();
+                    self.dialog = Some(Dialog::OpenFile);
+                }
+                "openurl" => {
+                    self.dlg_text.clear();
+                    self.dialog = Some(Dialog::OpenUrl);
+                }
                 "subtitlebatch" => {
                     self.dialog = Some(Dialog::SubtitleBatch);
                 }
@@ -761,12 +925,65 @@ impl App {
                 "presets" => {
                     self.dialog = Some(Dialog::Presets);
                 }
+                "about" => {
+                    self.dialog = Some(Dialog::About);
+                }
+                "vlcmissing" => {
+                    // A picture of the setup card, for a machine that has VLC.
+                    self.engine = None;
+                    self.libvlc_version = None;
+                    self.vlc_missing = true;
+                    self.engine_error = Some(crate::platform::vlc_missing_hint().to_string());
+                    self.dialog = Some(Dialog::VlcMissing);
+                }
+                "vlcplayer" => {
+                    // The in-player card, with the dialog out of the way.
+                    self.engine = None;
+                    self.libvlc_version = None;
+                    self.vlc_missing = true;
+                    self.engine_error = Some(crate::platform::vlc_missing_hint().to_string());
+                    self.view = View::Player;
+                }
+                "vlclibrary" => {
+                    // The quiet banner the library shows instead of playback.
+                    self.engine = None;
+                    self.libvlc_version = None;
+                    self.vlc_missing = true;
+                    self.engine_error = Some(crate::platform::vlc_missing_hint().to_string());
+                    self.view = View::Library;
+                    self.section = Section::Videos;
+                }
+                "vlcstart" => {
+                    // The first launch on a machine without VLC: library behind,
+                    // setup card in front.
+                    self.engine = None;
+                    self.libvlc_version = None;
+                    self.vlc_missing = true;
+                    self.engine_error = Some(crate::platform::vlc_missing_hint().to_string());
+                    self.now = None;
+                    self.view = View::Library;
+                    self.section = Section::Home;
+                    self.sidebar_open = false;
+                    self.dialog = Some(Dialog::VlcMissing);
+                }
                 "music" => {
                     self.view = View::Library;
                     self.section = Section::Music;
                 }
                 _ => {}
             }
+        }
+        if let Ok(dir) = std::env::var("VLCCRAFT_SHOT_DIR") {
+            if std::path::Path::new(&dir).is_dir() {
+                self.browse_dir = dir;
+                if let Ok(file) = std::env::var("VLCCRAFT_SHOT_SELECT") {
+                    self.browse_sel = Some(file);
+                }
+            }
+        }
+        if std::env::var("VLCCRAFT_SHOT_TYPING").is_ok() {
+            self.browse_typing = true;
+            self.dlg_text = self.browse_dir.clone();
         }
         if let Ok(tab) = std::env::var("VLCCRAFT_SHOT_TAB") {
             if let Ok(index) = tab.parse::<usize>() {
@@ -836,6 +1053,260 @@ impl App {
             until: self.time + 3.6,
         });
         self.toast_seq += 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Version and updates
+    // -----------------------------------------------------------------------
+
+    /// The number this build carries, as it is written in `Cargo.toml`.
+    pub fn version(&self) -> &'static str {
+        crate::update::CURRENT
+    }
+
+    /// Asks GitHub for the newest release in the background. Playback, the
+    /// library and the settings never wait for the answer.
+    pub fn check_for_updates(&mut self) {
+        if self.update_busy {
+            return;
+        }
+        self.update_busy = true;
+        self.updates = UpdateState::Checking;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let answer = crate::update::fetch_latest();
+            let _ = tx.send(UpdateMsg::Answer(answer));
+        });
+    }
+
+    /// The newest published release, when one is known.
+    pub fn latest_release(&self) -> Option<&crate::update::Release> {
+        match &self.updates {
+            UpdateState::Newest { release }
+            | UpdateState::Newer { release }
+            | UpdateState::Ahead { release } => Some(release),
+            _ => None,
+        }
+    }
+
+    /// Downloads the newer release, checks it against the published
+    /// fingerprint and puts it where this copy lives. Runs in the background;
+    /// `poll_updates` reports each step.
+    pub fn install_update(&mut self) {
+        if self.update_busy {
+            return;
+        }
+        let release = match &self.updates {
+            UpdateState::Newer { release } => release.clone(),
+            _ => return,
+        };
+        let Some(asset) = release.asset_for_this_machine().cloned() else {
+            self.toast_now("This release has no download for this system");
+            return;
+        };
+        self.update_busy = true;
+        self.update_progress = Some(0.0);
+        self.update_done_bytes = 0;
+        self.update_total_bytes = asset.size;
+        self.update_stage = "Downloading".into();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let file = crate::update::download_dir().join(&asset.name);
+            let mut last = std::time::Instant::now();
+            let got = crate::update::download(&asset, &file, &mut |ratio, done| {
+                // 8 reports a second is plenty for a bar that has to look calm.
+                if last.elapsed().as_millis() >= 120 {
+                    last = std::time::Instant::now();
+                    let _ = tx.send(UpdateMsg::Progress {
+                        ratio,
+                        done,
+                        total: asset.size,
+                        stage: "Downloading".into(),
+                    });
+                }
+            });
+            let done_bytes = match got {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    let _ = tx.send(UpdateMsg::Failed(reason));
+                    return;
+                }
+            };
+            let _ = tx.send(UpdateMsg::Progress {
+                ratio: 1.0,
+                done: done_bytes,
+                total: asset.size,
+                stage: "Checking the download".into(),
+            });
+            // The fingerprint beside the file is what makes a download the
+            // publisher's file. A mismatch is fatal; a missing fingerprint is
+            // said out loud rather than hidden.
+            if let Some(sum_asset) = release.checksum_for(&asset) {
+                match crate::update::fetch_published_fingerprint(sum_asset) {
+                    Ok(want) => match crate::update::sha256_file(&file) {
+                        Ok(got) if got == want => {}
+                        Ok(_) => {
+                            let _ = std::fs::remove_file(&file);
+                            let _ = tx.send(UpdateMsg::Failed(
+                                "the download does not match its published checksum".into(),
+                            ));
+                            return;
+                        }
+                        Err(reason) => {
+                            let _ = tx.send(UpdateMsg::Failed(format!(
+                                "the download could not be read back: {reason}"
+                            )));
+                            return;
+                        }
+                    },
+                    Err(_) => {}
+                }
+            }
+            let result = crate::update::install(&file, &mut |stage| {
+                let _ = tx.send(UpdateMsg::Progress {
+                    ratio: 1.0,
+                    done: done_bytes,
+                    total: asset.size,
+                    stage: stage.to_string(),
+                });
+            });
+            match result {
+                Ok(crate::update::Installed::Replaced { path }) => {
+                    let _ = std::fs::remove_file(&file);
+                    let _ = tx.send(UpdateMsg::Installed {
+                        version: release.version.clone(),
+                        path,
+                        opened: false,
+                    });
+                }
+                Ok(crate::update::Installed::Opened { path }) => {
+                    let _ = tx.send(UpdateMsg::Installed {
+                        version: release.version.clone(),
+                        path,
+                        opened: true,
+                    });
+                }
+                Err(reason) => {
+                    let _ = tx.send(UpdateMsg::Failed(reason));
+                }
+            }
+        });
+    }
+
+    /// "Later": the notice for this particular release stays quiet.
+    pub fn defer_update(&mut self) {
+        if let UpdateState::Newer { release } = &self.updates {
+            self.settings.update_skipped = release.version.clone();
+            self.touch();
+        }
+    }
+
+    /// Starts the new copy and lets this window close. Only meaningful when
+    /// the file was replaced in place.
+    pub fn restart_into_update(&mut self, ctx: &Context) {
+        let Some(installed) = self.update_installed.clone() else {
+            return;
+        };
+        if installed.opened {
+            // macOS: the disk image is already open for the person.
+            return;
+        }
+        match crate::update::launch(&installed.path) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.toast_now(format!("The new copy could not be started — {e}")),
+        }
+    }
+
+    fn poll_updates(&mut self, ctx: &Context) {
+        let mut messages = Vec::new();
+        if let Some(rx) = &self.update_rx {
+            while let Ok(message) = rx.try_recv() {
+                messages.push(message);
+            }
+        }
+        for message in messages {
+            match message {
+                UpdateMsg::Answer(Ok(release)) => {
+                    self.update_busy = false;
+                    self.update_rx = None;
+                    self.settings.update_checked_ms = now_ms();
+                    self.touch();
+                    let newer = crate::update::is_newer(&release.version, crate::update::CURRENT);
+                    let same = crate::update::version_key(&release.version)
+                        == crate::update::version_key(crate::update::CURRENT);
+                    if newer {
+                        let quiet = self.settings.update_skipped == release.version;
+                        if !self.update_announced && !quiet && self.shot.is_none() {
+                            self.update_announced = true;
+                            self.toast_now(format!(
+                                "VLCCraft {} is available — Tools › About VLCCraft",
+                                release.version
+                            ));
+                        }
+                        self.updates = UpdateState::Newer { release };
+                    } else if same {
+                        self.updates = UpdateState::Newest { release };
+                    } else {
+                        self.updates = UpdateState::Ahead { release };
+                    }
+                }
+                UpdateMsg::Answer(Err(reason)) => {
+                    self.update_busy = false;
+                    self.update_rx = None;
+                    // A failed check is not written down as a check: the next
+                    // start should try again rather than wait a day.
+                    self.updates = UpdateState::Unreachable { reason };
+                }
+                UpdateMsg::Progress {
+                    ratio,
+                    done,
+                    total,
+                    stage,
+                } => {
+                    self.update_progress = Some(ratio);
+                    self.update_done_bytes = done;
+                    self.update_total_bytes = total;
+                    self.update_stage = stage;
+                }
+                UpdateMsg::Installed {
+                    version,
+                    path,
+                    opened,
+                } => {
+                    self.update_busy = false;
+                    self.update_rx = None;
+                    self.update_progress = None;
+                    self.update_stage.clear();
+                    self.update_installed = Some(UpdateInstalled {
+                        version: version.clone(),
+                        path,
+                        opened,
+                    });
+                    if opened {
+                        self.toast_now(format!(
+                            "VLCCraft {version} downloaded — drag it to Applications"
+                        ));
+                    } else {
+                        self.toast_now(format!("VLCCraft {version} is installed — restart to use it"));
+                    }
+                }
+                UpdateMsg::Failed(reason) => {
+                    self.update_busy = false;
+                    self.update_rx = None;
+                    self.update_progress = None;
+                    self.update_stage.clear();
+                    self.toast_now(format!("The update did not finish — {reason}"));
+                    if !matches!(self.updates, UpdateState::Newer { .. }) {
+                        self.updates = UpdateState::Unreachable { reason };
+                    }
+                }
+            }
+        }
+        if self.update_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1011,8 +1482,9 @@ impl App {
         self.thumbs.clear();
         self.last_thumb_bucket = -1;
         self.last_end_check = 0.0;
+        let version = crate::update::CURRENT;
         if let Some(now) = &self.now {
-            self.window_title = format!("{} — VLCCraft", now.title);
+            self.window_title = format!("{} — VLCCraft {}", now.title, version);
         }
         if self.shot.is_none() {
             self.save_library();
@@ -1396,12 +1868,29 @@ impl App {
     pub fn open_file_dialog(&mut self) {
         self.dlg_text = String::new();
         self.dlg_msg = None;
+        self.browse_sel = None;
+        self.browse_filter.clear();
+        self.browse_typing = false;
         self.dialog = Some(Dialog::OpenFile);
     }
 
     /// Convert and Stream-out are their own commands with one job each, not
     /// variants hidden inside "Open". Both are prefilled with what is playing.
     pub fn open_convert_dialog(&mut self) {
+        // Both jobs are driven by the VLC program itself, so without it the
+        // setup card is the honest answer rather than a dialog that cannot run.
+        if crate::tools::vlc_binary().is_err() {
+            if self.engine.is_none() {
+                self.vlc_missing = true;
+                self.dlg_msg = None;
+                self.dialog = Some(Dialog::VlcMissing);
+            } else {
+                self.toast_now(
+                    "Converting and streaming need the VLC program, which is not installed",
+                );
+            }
+            return;
+        }
         let source = self
             .now
             .as_ref()
@@ -1421,6 +1910,18 @@ impl App {
     }
 
     pub fn open_stream_dialog(&mut self) {
+        if crate::tools::vlc_binary().is_err() {
+            if self.engine.is_none() {
+                self.vlc_missing = true;
+                self.dlg_msg = None;
+                self.dialog = Some(Dialog::VlcMissing);
+            } else {
+                self.toast_now(
+                    "Converting and streaming need the VLC program, which is not installed",
+                );
+            }
+            return;
+        }
         let source = self
             .now
             .as_ref()
@@ -1779,9 +2280,13 @@ impl App {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                1440.0, 900.0,
-            )));
+            // A picture at a chosen size keeps that size; only the default
+            // picture is pinned to the standard window.
+            if std::env::var("VLCCRAFT_SHOT_SIZE").is_err() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    1440.0, 900.0,
+                )));
+            }
         }
 
         // Progress watchdog. Some files leave libvlc frozen on the last frame
@@ -2159,6 +2664,7 @@ impl eframe::App for App {
         skin::install(ctx, &p, self.settings.interface_scale);
         self.tick(ctx);
         self.poll_url_probe();
+        self.poll_updates(ctx);
 
         // Remember the window the person leaves, so the next start opens the
         // size it was left at. A resize arrives in dozens of small steps, so

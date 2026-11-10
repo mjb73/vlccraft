@@ -41,6 +41,12 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      # The version compare, the asset choice and the checksum reader are the
+      # only parts of the updater that can be tested without a network, and
+      # they are the parts that decide whether an update is offered at all.
+      - name: Test
+        run: cargo test --locked
+
       # The program must open, draw and photograph itself on a machine with no
       # desktop. This is the same check the release build has to pass: a window
       # that starts but draws nothing would still "succeed" without it.
@@ -66,3 +72,80 @@ jobs:
       - name: Version
         if: runner.os == 'Linux'
         run: ./target/release/vlccraft --version
+
+  # The installer is the first thing a new person meets, and its failures show up
+  # as "Cannot open: No such file or directory" a long way from the cause — so
+  # every way of arriving at it is exercised here, against a stand-in program.
+  installer:
+    name: installer (every way in)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a stand-in download
+        run: |
+          set -e
+          V=9.9.9
+          D=vlccraft-$V-x86_64-linux
+          mkdir -p pkg/$D
+          cat > pkg/$D/vlccraft <<'STUB'
+          #!/bin/sh
+          case "${1:-}" in
+            --version) echo "VLCCraft 9.9.9" ;;
+            --vlc-status) echo "vlc=present" ;;
+          esac
+          exit 0
+          STUB
+          chmod +x pkg/$D/vlccraft
+          cp install.sh pkg/$D/
+          cp assets/vlccraft-256.png pkg/$D/vlccraft.png
+          tar -C pkg -czf "vlccraft-$V-x86_64-linux.tar.gz" "$D"
+
+      - name: Browser route — download in Downloads, cd, unpack, install
+        run: |
+          set -e
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads"
+          cp vlccraft-9.9.9-x86_64-linux.tar.gz "$HOME/Downloads/"
+          cd "$HOME/Downloads"
+          tar -xzf vlccraft-9.9.9-x86_64-linux.tar.gz
+          VLCCRAFT_SKIP_VLC_PROMPT=1 sh vlccraft-9.9.9-x86_64-linux/install.sh
+          test -x "$HOME/.local/bin/vlccraft"
+          test -f "$HOME/.local/share/applications/vlccraft.desktop"
+          test -f "$HOME/.local/share/icons/hicolor/256x256/apps/vlccraft.png"
+
+      - name: The download is somewhere else — the installer finds it
+        run: |
+          set -e
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads" "$HOME/elsewhere"
+          cp vlccraft-9.9.9-x86_64-linux.tar.gz "$HOME/Downloads/vlccraft-9.9.9-x86_64-linux (1).tar.gz"
+          cd "$HOME/elsewhere"
+          VLCCRAFT_SKIP_VLC_PROMPT=1 sh "$GITHUB_WORKSPACE/install.sh"
+          test -x "$HOME/.local/bin/vlccraft"
+          test "$("$HOME/.local/bin/vlccraft" --version)" = "VLCCraft 9.9.9"
+
+      - name: Undo it, and keep the person's data until asked
+        run: |
+          set -e
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads" "$HOME/.local/share/vlccraft"
+          touch "$HOME/.local/share/vlccraft/library.json"
+          cp vlccraft-9.9.9-x86_64-linux.tar.gz "$HOME/Downloads/"
+          VLCCRAFT_SKIP_VLC_PROMPT=1 sh "$GITHUB_WORKSPACE/install.sh"
+          sh "$GITHUB_WORKSPACE/install.sh" --uninstall
+          test ! -e "$HOME/.local/bin/vlccraft"
+          test -f "$HOME/.local/share/vlccraft/library.json"
+          sh "$GITHUB_WORKSPACE/install.sh" --purge
+          test ! -e "$HOME/.local/share/vlccraft"
+
+      - name: The words on the page work in fish
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y fish
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads"
+          cp vlccraft-9.9.9-x86_64-linux.tar.gz "$HOME/Downloads/"
+          fish -c "cd $HOME/Downloads && tar -xzf vlccraft-9.9.9-x86_64-linux.tar.gz && sh vlccraft-9.9.9-x86_64-linux/install.sh"
+          test -x "$HOME/.local/bin/vlccraft"
