@@ -1,0 +1,213 @@
+name: Release
+
+# Tag a commit and the downloads appear:
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Artifacts: a Linux tarball and .deb, a .dmg per Mac architecture, a Windows
+# .zip, and a .sha256 beside each one. The macOS bundle is signed ad-hoc; see
+# README "Install" for what that means for the person downloading it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: linux (x86_64)
+    runs-on: ubuntu-24.04
+    # Built inside an old-base image on purpose: the glibc a binary links
+    # against becomes the glibc every user needs. Debian 12 gives 2.36, which
+    # still starts on Debian 12, Mint 22, Ubuntu 24.04 and Fedora 39. The image
+    # is `node:` rather than `debian:` because a container job runs the `uses:`
+    # actions inside it, and those need node.
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain and build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config ca-certificates dpkg-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # Printed so the log itself proves the floor the binary asks for.
+      - name: Report the glibc floor
+        run: |
+          readelf --version-info target/release/vlccraft \
+            | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -3
+
+      - name: Package tarball
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          D=vlccraft-$V-x86_64-linux
+          mkdir -p dist/$D
+          cp target/release/vlccraft dist/$D/
+          cp install.sh dist/$D/
+          cp assets/vlccraft-256.png dist/$D/vlccraft.png
+          cp packaging/linux/vlccraft.desktop dist/$D/
+          cp README.md LICENSE dist/$D/
+          tar -C dist -czf dist/$D.tar.gz $D
+
+      - name: Debian package
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          chmod +x packaging/linux/make-deb.sh
+          packaging/linux/make-deb.sh target/release/vlccraft "$V" amd64 dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          for f in *.tar.gz *.deb; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macos (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Bundle and sign
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          chmod +x packaging/macos/make-app.sh
+          packaging/macos/make-app.sh \
+            "target/${{ matrix.target }}/release/vlccraft" "$V" dist
+          mv "dist/VLCCraft-$V.dmg" "dist/VLCCraft-$V-${{ matrix.arch }}.dmg"
+          ( cd dist && shasum -a 256 "VLCCraft-$V-${{ matrix.arch }}.dmg" \
+              > "VLCCraft-$V-${{ matrix.arch }}.dmg.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: windows (x86_64)
+    runs-on: windows-2022
+    # Static C runtime on purpose. The default MSVC build imports VCRUNTIME140.dll,
+    # which comes from the Visual C++ redistributable — present on most PCs,
+    # absent on a clean install, where the zip then fails to start.
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64-static-crt
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Check the runtime dependency
+        shell: pwsh
+        run: |
+          cmd /c 'findstr /M /C:"VCRUNTIME140.dll" target\release\vlccraft.exe' | Out-Null
+          # findstr exits 1 when the string is absent, which is the result we want.
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "still imports VCRUNTIME140.dll - the static CRT flag did not apply"
+            exit 1
+          }
+          Write-Host "no VCRUNTIME140.dll import: the exe is self-contained"
+          exit 0
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          $d = "vlccraft-$v-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist/$d" | Out-Null
+          Copy-Item target/release/vlccraft.exe "dist/$d/"
+          Copy-Item README.md, LICENSE "dist/$d/"
+          Compress-Archive -Path "dist/$d/*" -DestinationPath "dist/$d.zip" -Force
+          $h = (Get-FileHash "dist/$d.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $d.zip" | Out-File -Encoding ascii "dist/$d.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: [linux, macos, windows]
+    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List downloads
+        run: ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: false
+          generate_release_notes: false
+          body: |
+            VLCCraft ${{ github.ref_name }} — a calm skin over the VLC you already have.
+
+            **Nothing is bundled.** VLCCraft loads the `libvlc` that your installed
+            player provides, so install VLC first (videolan.org) and let it update
+            as usual.
+
+            **Linux** — the tarball, which has `install.sh` (no root), or the `.deb`:
+            ```sh
+            tar -xzf vlccraft-*-x86_64-linux.tar.gz
+            ./vlccraft-*-x86_64-linux/install.sh
+            ```
+
+            **macOS** — open the `.dmg` for your Mac (`aarch64` for Apple silicon,
+            `x86_64` for Intel) and drag VLCCraft to Applications. The app is signed
+            ad-hoc, so the first launch needs right-click → Open.
+
+            **Windows** — unzip and run `vlccraft.exe`. SmartScreen may warn about an
+            unsigned download: More info → Run anyway.
+
+            Your library index, resume positions, presets and settings stay in your
+            own folder. Nothing leaves the machine.

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            libegl1-mesa-dev mesa-utils xvfb
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # The program must open, draw and photograph itself on a machine with no
+      # desktop. This is the same check the release build has to pass: a window
+      # that starts but draws nothing would still "succeed" without it.
+      - name: Draws a picture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p shots
+          xvfb-run -a --server-args="-screen 0 1440x900x24" \
+            ./target/release/vlccraft --screenshot shots/ci.png
+          test -s shots/ci.png
+          ls -l shots/ci.png
+          python3 - <<'PY'
+          import struct, zlib
+          data = open("shots/ci.png", "rb").read()
+          assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+          width, height = struct.unpack(">II", data[16:24])
+          # A window that opens but never draws comes out as one flat colour and
+          # compresses to almost nothing. The interface is never that flat.
+          assert len(data) > 20000, f"the picture is nearly empty ({len(data)} bytes)"
+          print(f"{width}x{height}, {len(data)} bytes of picture")
+          PY
+
+      - name: Version
+        if: runner.os == 'Linux'
+        run: ./target/release/vlccraft --version
