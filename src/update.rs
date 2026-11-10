@@ -967,17 +967,34 @@ mod tests {
                 {"name": "vlccraft-1.2.0-x86_64-linux.tar.gz", "browser_download_url": "https://example/a", "size": 1000},
                 {"name": "vlccraft-1.2.0-x86_64-linux.tar.gz.sha256", "browser_download_url": "https://example/a.sha256", "size": 90},
                 {"name": "vlccraft-1.2.0-windows-x64.zip", "browser_download_url": "https://example/w", "size": 900},
-                {"name": "VLCCraft-1.2.0.dmg", "browser_download_url": "https://example/d", "size": 800}
+                {"name": "vlccraft-1.2.0-windows-x64.zip.sha256", "browser_download_url": "https://example/w.sha256", "size": 90},
+                {"name": "VLCCraft-1.2.0.dmg", "browser_download_url": "https://example/d", "size": 800},
+                {"name": "VLCCraft-1.2.0.dmg.sha256", "browser_download_url": "https://example/d.sha256", "size": 90}
             ]
         }"#;
         let release = parse_release(body).expect("release should parse");
         assert_eq!(release.version, "1.2.0");
         assert_eq!(release.published, "12 November 2026");
-        assert_eq!(release.assets.len(), 4);
+        assert_eq!(release.assets.len(), 6);
+        // Whichever system this test runs on, the file chosen for it must be a
+        // file with a fingerprint beside it — the earlier fixture carried only
+        // the Linux one, so the test passed on Linux and failed on the two
+        // systems the updater matters most on.
         let asset = release.asset_for_this_machine().expect("a file for this system");
         assert!(!asset.name.ends_with(".sha256"));
-        let checksum = release.checksum_for(asset).expect("the fingerprint beside it");
+        let checksum = release
+            .checksum_for(asset)
+            .unwrap_or_else(|| panic!("no fingerprint beside {}", asset.name));
         assert!(checksum.name.ends_with(".sha256"));
+        // The contract itself, on every platform rather than the one running:
+        // each download a release offers has its fingerprint beside it.
+        for a in release.assets.iter().filter(|a| !a.name.ends_with(".sha256")) {
+            assert!(
+                release.checksum_for(a).is_some(),
+                "{} has no fingerprint beside it",
+                a.name
+            );
+        }
         let excerpt = release.notes_excerpt(200);
         assert!(excerpt.contains("Queue survives a restart"), "{excerpt}");
         assert!(!excerpt.contains('*'));
