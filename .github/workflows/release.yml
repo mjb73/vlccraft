@@ -208,6 +208,12 @@ jobs:
     needs: [linux, macos, windows]
     if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    env:
+      # The one line a person copies. It names the installer as a file in this
+      # repository rather than as a download inside a release, because a release
+      # published before that download existed answered 404 at the old address —
+      # which reads as "this project is broken" and is impossible to explain.
+      INSTALL_URL: https://raw.githubusercontent.com/mjb73/vlccraft/main/install.sh
     steps:
       # Checkout, because the installer itself is one of the downloads: it is
       # copied from the repository at the tag, not from any build artifact.
@@ -243,8 +249,10 @@ jobs:
             fish, bash and zsh, fetches the newest version, checks its fingerprint and
             installs it without root:
             ```sh
-            curl -fsSL https://github.com/mjb73/vlccraft/releases/latest/download/install.sh -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
+            curl -fsSL ${{ env.INSTALL_URL }} -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
             ```
+            That address is a file in the repository, so it works at every version.
+            The same script is below as `install.sh`; both install the newest release.
 
             Or download `install.sh` from the list below and run:
             ```sh
@@ -271,3 +279,43 @@ jobs:
 
             Your library index, resume positions, presets and settings stay in your
             own folder. Nothing leaves the machine.
+
+      # A command that answers 404 is the first thing a person meets and it is
+      # indistinguishable from "this project is broken", so every address these
+      # notes and the README name is asked for here, after publishing. The
+      # download servers lag a few seconds behind a new release, hence retries.
+      - name: The documented addresses answer
+        run: |
+          set -u
+          V="${GITHUB_REF_NAME#v}"
+          repo="${{ github.repository }}"
+          base="https://github.com/$repo/releases/download/$GITHUB_REF_NAME"
+          fail=0
+          ask() {  # $1 = what it is, $2 = address, $3 = 1 when its loss must fail
+            i=0
+            code=
+            while [ "$i" -lt 10 ]; do
+              code=$(curl -sL -o /dev/null -w '%{http_code}' "$2" || true)
+              if [ "$code" = "200" ]; then
+                printf 'ok       %-32s %s\n' "$1" "$2"
+                return 0
+              fi
+              i=$((i + 1))
+              sleep 6
+            done
+            if [ "$3" = 1 ]; then
+              printf '::error::%s answers %s: %s\n' "$1" "${code:-nothing}" "$2"
+              fail=1
+            else
+              printf '::warning::%s answers %s: %s\n' "$1" "${code:-nothing}" "$2"
+            fi
+          }
+          ask "the one-line install" "$INSTALL_URL" 1
+          ask "Linux tarball" "$base/vlccraft-$V-x86_64-linux.tar.gz" 1
+          ask "Linux fingerprint" "$base/vlccraft-$V-x86_64-linux.tar.gz.sha256" 1
+          ask "installer beside the release" \
+              "https://github.com/$repo/releases/latest/download/install.sh" 0
+          ask "Debian package" "$base/vlccraft_${V}_amd64.deb" 0
+          ask "macOS image" "$base/VLCCraft-$V.dmg" 0
+          ask "Windows zip" "$base/vlccraft-$V-windows-x64.zip" 0
+          exit "$fail"

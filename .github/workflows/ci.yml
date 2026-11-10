@@ -149,3 +149,133 @@ jobs:
           cp vlccraft-9.9.9-x86_64-linux.tar.gz "$HOME/Downloads/"
           fish -c "cd $HOME/Downloads && tar -xzf vlccraft-9.9.9-x86_64-linux.tar.gz && sh vlccraft-9.9.9-x86_64-linux/install.sh"
           test -x "$HOME/.local/bin/vlccraft"
+
+      # The one-line install is documentation that has to stay true, and it has
+      # already been the thing that broke: the address was a file inside a
+      # release, and the release did not carry it, so the first command a person
+      # runs answered 404. Every repository address in the instructions must now
+      # be a file that exists here, and the README and the release notes must
+      # quote the same one.
+      - name: The addresses in the instructions are real files
+        run: |
+          set -e
+          urls=$(grep -ho 'https://raw\.githubusercontent\.com/mjb73/vlccraft/main/[A-Za-z0-9._/-]*' \
+                   README.md .github/workflows/release.yml | sort -u || true)
+          if [ -z "$urls" ]; then
+            echo "the instructions name no installer in this repository"; exit 1
+          fi
+          for u in $urls; do
+            f=${u#https://raw.githubusercontent.com/mjb73/vlccraft/main/}
+            if [ ! -f "$f" ]; then
+              echo "the instructions point at $f, which is not in the repository"; exit 1
+            fi
+            echo "ok  $u  ->  $f"
+          done
+          a=$(grep -c 'raw\.githubusercontent\.com/mjb73/vlccraft/main/install\.sh' README.md || true)
+          b=$(grep -c 'raw\.githubusercontent\.com/mjb73/vlccraft/main/install\.sh' .github/workflows/release.yml || true)
+          if [ "${a:-0}" = 0 ] || [ "${b:-0}" = 0 ]; then
+            echo "the README and the release notes must name the same install line"; exit 1
+          fi
+          # ...and the installer they name has to explain itself without the file.
+          grep -q 'Usage: sh install.sh' install.sh
+          sh -n install.sh
+
+      # The one-line install is the command most people type, and it has two ways
+      # to betray them: an old tarball left in Downloads getting installed instead
+      # of the newest release, and a download whose name no longer matches the
+      # version the release page reports. Both are exercised here against a
+      # stand-in for curl, so no network is involved.
+      - name: The one-line install takes the newest release, not an old download
+        run: |
+          set -eu
+          # Everything happens in its own folder: a tarball left in the workspace
+          # would be found by the later steps' look-around and confuse them.
+          mkdir -p oneliner
+          ws="$GITHUB_WORKSPACE"
+          cd oneliner
+          # A stand-in for curl that serves one release out of local files.
+          mkdir -p fake
+          cat > fake/curl <<'STUB'
+          #!/bin/sh
+          url=; dest=; want_dest=
+          for a in "$@"; do
+            if [ "${want_dest:-}" = 1 ]; then dest=$a; want_dest=; continue; fi
+            case "$a" in
+              -o) want_dest=1 ;;
+              *http*) url=$a ;;
+            esac
+          done
+          case "$url" in
+            *api.github.com*) cat "$STUB_JSON"; exit 0 ;;
+          esac
+          case "$url" in
+            *.tar.gz.sha256) cp "$STUB_SHA" "$dest"; exit 0 ;;
+            *.tar.gz)
+                case "$url" in
+                  *"$STUB_ASSET") cp "$STUB_TARBALL" "$dest"; exit 0 ;;
+                esac ;;
+          esac
+          case "$url" in
+            */releases/latest)
+                printf '%s\n' "https://github.com/mjb73/vlccraft/releases/tag/v$STUB_VERSION"
+                exit 0 ;;
+          esac
+          echo "curl: (22) The requested URL returned error: 404" >&2
+          exit 22
+          STUB
+          chmod +x fake/curl
+
+          # An older download, which is what a person who installed a previous
+          # version still has lying about — complete, with the installer inside it.
+          OLD=vlccraft-1.0.0-x86_64-linux
+          mkdir -p oldpkg/$OLD
+          printf '#!/bin/sh\ncase "${1:-}" in\n  --version) echo "VLCCraft 1.0.0" ;;\n  --vlc-status) echo "vlc=present" ;;\nesac\nexit 0\n' > oldpkg/$OLD/vlccraft
+          chmod +x oldpkg/$OLD/vlccraft
+          cp "$ws/install.sh" "$ws/assets/vlccraft-256.png" oldpkg/$OLD/ 2>/dev/null ||
+            cp "$ws/install.sh" oldpkg/$OLD/
+          tar -C oldpkg -czf "vlccraft-1.0.0-x86_64-linux.tar.gz" "$OLD"
+
+          export STUB_VERSION=9.9.9
+          fake="$PWD/fake"
+          export STUB_TARBALL="$ws/vlccraft-9.9.9-x86_64-linux.tar.gz"
+          export STUB_ASSET=vlccraft-9.9.9-x86_64-linux.tar.gz
+          export STUB_SHA="$PWD/stub.sha256"
+          export STUB_JSON="$PWD/stub.json"
+          printf '%s  %s\n' "$(sha256sum "$STUB_TARBALL" | cut -d' ' -f1)" "$STUB_ASSET" > "$STUB_SHA"
+          printf '{"tag_name":"v9.9.9","assets":[{"name":"%s"}]}\n' "$STUB_ASSET" > "$STUB_JSON"
+
+          # 1. The one-line command: the installer lands in a temporary folder,
+          #    and an old tarball is waiting in Downloads. The newest must win.
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads" "$HOME/one-liner"
+          cp vlccraft-1.0.0-x86_64-linux.tar.gz "$HOME/Downloads/"
+          cp "$ws/install.sh" "$HOME/one-liner/"
+          PATH="$fake:$PATH" VLCCRAFT_SKIP_VLC_PROMPT=1 sh "$HOME/one-liner/install.sh" >/dev/null
+          got=$("$HOME/.local/bin/vlccraft" --version)
+          test "$got" = "VLCCraft 9.9.9" || { echo "the one-line install put $got in place"; exit 1; }
+          echo "ok  the one-line install took $got, not the 1.0.0 in Downloads"
+
+          # 2. A release whose download is named differently than the version
+          #    guess: the installer asks the release instead of failing.
+          export HOME=$(mktemp -d)
+          export STUB_ASSET=vlccraft-linux-x86_64-9.9.9.tar.gz
+          printf '{"tag_name":"v9.9.9","assets":[{"name":"%s"}]}\n' "$STUB_ASSET" > "$STUB_JSON"
+          mkdir -p "$HOME/renamed-one"
+          cp "$ws/install.sh" "$HOME/renamed-one/"
+          PATH="$fake:$PATH" VLCCRAFT_SKIP_VLC_PROMPT=1 sh "$HOME/renamed-one/install.sh" >/dev/null
+          got=$("$HOME/.local/bin/vlccraft" --version)
+          test "$got" = "VLCCraft 9.9.9" || { echo "a renamed download left $got in place"; exit 1; }
+          echo "ok  a renamed download was found anyway: $got"
+
+          # 3. A tarball in Downloads and the installer that came inside it: that
+          #    copy is the one wanted. The stand-in still offers 9.9.9, so a
+          #    fetch would show up as the wrong version below.
+          export HOME=$(mktemp -d)
+          mkdir -p "$HOME/Downloads"
+          cp vlccraft-1.0.0-x86_64-linux.tar.gz "$HOME/Downloads/"
+          cd "$HOME/Downloads" && tar -xzf vlccraft-1.0.0-x86_64-linux.tar.gz
+          PATH="$fake:$PATH" VLCCRAFT_SKIP_VLC_PROMPT=1 \
+            sh vlccraft-1.0.0-x86_64-linux/install.sh >/dev/null
+          got=$("$HOME/.local/bin/vlccraft" --version)
+          test "$got" = "VLCCraft 1.0.0" || { echo "the copy that came with the download left $got in place"; exit 1; }
+          echo "ok  the installer inside a download used that download: $got"

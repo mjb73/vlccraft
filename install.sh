@@ -10,6 +10,11 @@
 #                                  and installs it
 #   sh install.sh FILE.tar.gz      install from a download you already have
 #   ./install.sh                   inside an unpacked tarball, the classic way
+#   curl … | sh                    straight down a pipe: the newest release
+#
+# One download is used when you ran the installer that came with it; otherwise
+# the newest release is fetched. So a tarball left in Downloads from last month
+# never wins over the version the one-line command promised.
 #
 # Other uses:
 #   PREFIX=~/bin sh install.sh     put the program somewhere else
@@ -145,6 +150,28 @@ release_version() {
     return 1
 }
 
+fetch_text() {
+    # $1 = url. Prints the body, or nothing when it cannot be had.
+    if have curl; then
+        curl -fsSL --retry 2 --connect-timeout 20 "$1" 2>/dev/null
+    elif have wget; then
+        wget -qO- --timeout=20 "$1" 2>/dev/null
+    fi
+}
+
+release_asset() {
+    # The Linux tarball's real name, asked of the release that holds it. The
+    # name carries the version, so it is the first thing to be wrong when a
+    # release renames or renumbers its files — asking beats guessing.
+    body=$(fetch_text "https://api.github.com/repos/$REPO/releases/latest" || true)
+    [ -n "$body" ] || return 0
+    printf '%s\n' "$body" |
+        tr ',' '\n' |
+        sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        grep -E '(x86_64|amd64).*linux.*\.tar\.gz$|linux.*(x86_64|amd64).*\.tar\.gz$' |
+        head -1
+}
+
 fetch() {
     # $1 = url, $2 = destination
     if have curl; then
@@ -173,6 +200,23 @@ found=
 version=
 srcbin=
 srcdir=
+
+# Where did this script come from? Down a pipe (`curl … | sh`), or out of a
+# temporary folder (the `curl -o /tmp/…` line in the README), it came from the
+# internet: the person asked for the newest release, so a tarball lying in
+# Downloads must not win over it.
+from_internet=
+temp_root=${TMPDIR:-/tmp}
+temp_root=${temp_root%/}
+case "${0##*/}" in
+    sh|dash|bash|zsh|ksh|-sh) from_internet=1 ;;
+esac
+if [ -z "$from_internet" ]; then
+    case "$here" in
+        /tmp/*|/var/tmp/*|"$temp_root"|"$temp_root"/*) from_internet=1 ;;
+    esac
+fi
+
 if [ -n "$want" ]; then
     [ -e "$want" ] || die "there is no file at $want — check the name and try again"
     case "$want" in
@@ -189,6 +233,10 @@ if [ -n "$want" ]; then
     esac
 elif [ -x "$here/$APP" ]; then
     found="program $here/$APP"
+elif [ -n "$from_internet" ]; then
+    # A lone installer that arrived from the internet: nothing beside it, and
+    # whatever is lying in Downloads is older than what was just asked for.
+    found=
 else
     found=$(look_around)
 fi
@@ -216,7 +264,11 @@ Download it again from https://github.com/$REPO/releases"
         ;;
     *)
         # Nothing on this machine: fetch the newest release.
-        say "No download found here, so fetching the newest VLCCraft…"
+        if [ -n "$from_internet" ]; then
+            say "Fetching the newest VLCCraft…"
+        else
+            say "No download found here, so fetching the newest VLCCraft…"
+        fi
         version=$(release_version) || die "could not reach GitHub to find the newest version.
 Check the connection, or download the Linux tarball from
 https://github.com/$REPO/releases and run:
@@ -224,8 +276,21 @@ https://github.com/$REPO/releases and run:
         asset="vlccraft-$version-x86_64-linux.tar.gz"
         base="https://github.com/$REPO/releases/download/v$version"
         say "Downloading VLCCraft $version…"
-        fetch "$base/$asset" "$work/$asset" || die "the download failed.
+        if ! fetch "$base/$asset" "$work/$asset" 2>/dev/null; then
+            # The file name carries the version, so a renamed or renumbered
+            # download is the usual reason an address that looks right holds
+            # nothing. Ask the release which file it actually has.
+            say "That address held nothing, so asking the release what it carries…"
+            asset=$(release_asset || true)
+            if [ -z "$asset" ]; then
+                die "could not find a Linux download to fetch.
+Check the connection first; if the network is fine, the release page is
+https://github.com/$REPO/releases"
+            fi
+            say "Downloading $asset…"
+            fetch "$base/$asset" "$work/$asset" || die "the download failed.
 Try the release page in a browser: https://github.com/$REPO/releases"
+        fi
         if fetch "$base/$asset.sha256" "$work/$asset.sha256" 2>/dev/null; then
             want_sum=$(sed -n '1s/[[:space:]].*//p' "$work/$asset.sha256")
             if have sha256sum; then

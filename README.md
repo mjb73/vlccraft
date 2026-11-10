@@ -72,25 +72,41 @@ newest version, checks its fingerprint, and installs it. No root, nothing in
 system folders:
 
 ```sh
-curl -fsSL https://github.com/mjb73/vlccraft/releases/latest/download/install.sh -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
+curl -fsSL https://raw.githubusercontent.com/mjb73/vlccraft/main/install.sh -o /tmp/vlccraft-install.sh && sh /tmp/vlccraft-install.sh
 ```
 
-*Or download it in a browser.* Click `vlccraft-1.0.1-x86_64-linux.tar.gz` on the
+That address is the installer file itself, kept in this repository, so it is
+there at every version and does not depend on a release page being filled in.
+The same script is also listed on the
+[releases page](https://github.com/mjb73/vlccraft/releases) as `install.sh`; both
+copies install the newest release, and running the one from the repository is
+the route that cannot go stale.
+
+*Or download it in a browser.* Click the Linux tarball on the
 [releases page](https://github.com/mjb73/vlccraft/releases); it lands in your
 **Downloads** folder. Then run these three lines in a terminal, one after
 another. The `cd` is the part that matters: a fresh terminal starts in your home
-folder, and the download is in Downloads.
+folder, and the download is in Downloads. The `*` stands for the version number,
+so these lines keep working when a newer release arrives:
 
 ```sh
 cd ~/Downloads
-tar -xzf vlccraft-1.0.1-x86_64-linux.tar.gz
-sh vlccraft-1.0.1-x86_64-linux/install.sh
+tar -xzf vlccraft-*-x86_64-linux.tar.gz
+sh vlccraft-*-x86_64-linux/install.sh
 ```
 
 If a command answers `Cannot open: No such file or directory`, the file is not
 in the folder the terminal is in. `ls ~/Downloads` shows what is there; the
 name must match exactly, including the version number. The same holds for the
 `Unknown command` that follows it: it means the unpacking never happened.
+
+If a `curl` line answers `curl: (22) The requested URL returned error: 404`, the
+address it names is not on the release page — an older copy of these
+instructions asked the release for its installer, which a release published
+before that file was added does not carry. Nothing is wrong with the machine or
+with VLC. Use the one-line command above (it reads the file from the repository,
+not from a release), or click `install.sh` on the releases page and run
+`sh ~/Downloads/install.sh`.
 
 The installer copies the program into `~/.local/bin`, adds a menu entry and
 icon, and prints where each went. It then starts the copy it just wrote, so a
