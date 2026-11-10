@@ -365,7 +365,9 @@ say "Menu      $data/applications/$APP.desktop"
 # for a newer system than this one fails exactly here, and that is worth knowing
 # now rather than on the first double-click.
 installed_version=
-if installed_version=$("$prefix/$APP" --version 2>/dev/null); then
+# One line only: --version prints its banner first and a short line about the
+# build second, and only the first is the answer to "which version is this".
+if installed_version=$("$prefix/$APP" --version 2>/dev/null | head -1); then
     say ""
     say "Installed $installed_version."
 else
