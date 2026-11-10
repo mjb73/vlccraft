@@ -109,7 +109,10 @@ not from a release), or click `install.sh` on the releases page and run
 `sh ~/Downloads/install.sh`.
 
 The installer copies the program into `~/.local/bin`, adds a menu entry and
-icon, and prints where each went. It then starts the copy it just wrote, so a
+icon, and prints where each went. Run on its own like the line above, it
+installs the newest release — an older tarball left in Downloads does not win
+over it; the installer that came inside a download still installs that
+download. It then starts the copy it just wrote, so a
 download built for a newer system than yours fails there in plain words instead
 of on your first double-click. Before finishing it checks for VLC: if that is
 missing, it offers the command your distribution uses and continues cleanly when
