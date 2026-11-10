@@ -290,6 +290,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/assets/media/Films/Desert Road.mp4"
         );
+        // Converting needs both the installed VLC and a clip to convert. The
+        // clips are not in the repository, and CI has no VLC, so the test says
+        // it was skipped instead of failing for a reason that is not the code.
+        if !std::path::Path::new(src).exists() || crate::vlc::probe().is_err() {
+            eprintln!("skipped: needs the demo clip and an installed VLC");
+            return;
+        }
         let out = concat!(env!("CARGO_MANIFEST_DIR"), "/shots/conv-unit.mp4");
         let _ = std::fs::remove_file(out);
         let log_dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/shots"));
