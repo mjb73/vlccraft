@@ -730,9 +730,19 @@ impl App {
             let mut mesh = egui::Mesh::default();
             let _ = &mut mesh;
             painter.rect_filled(top_rect, CornerRadius::ZERO, Color32::from_black_alpha(170));
+            // Same comfortable width as the bottom band, so the title and the
+            // buttons do not sit in opposite corners of a 4K picture.
+            let content = if top_rect.width() > 1360.0 {
+                Rect::from_center_size(
+                    pos2(top_rect.center().x, top_rect.center().y),
+                    vec2(1360.0, top_rect.height()),
+                )
+            } else {
+                top_rect
+            };
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(top_rect.shrink2(vec2(20.0, 0.0)))
+                    .max_rect(content.shrink2(vec2(20.0, 0.0)))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             child.horizontal_centered(|ui| {
@@ -793,7 +803,18 @@ impl App {
             );
         }
 
-        let mut x = rect.left() + 12.0;
+        // On a very wide picture the bar's own contents would drift into the
+        // two far corners, a metre apart. Keep them at a comfortable width,
+        // centred over the picture; the band itself still spans the screen.
+        let laid = if overlay && rect.width() > 1360.0 {
+            Rect::from_center_size(
+                pos2(rect.center().x, rect.center().y),
+                vec2(1360.0, rect.height()),
+            )
+        } else {
+            rect
+        };
+        let mut x = laid.left() + 12.0;
         let cy = rect.center().y - 4.0;
         let btn = 30.0;
 
@@ -869,7 +890,7 @@ impl App {
         x += time_w;
 
         // Right cluster, measured from the right edge.
-        let mut rx = rect.right() - 12.0;
+        let mut rx = laid.right() - 12.0;
         let mut right_buttons: Vec<(Icon, &'static str, &'static str)> = Vec::new();
         let visible = self.settings.layout.controls.clone();
         let has = |id: &str| visible.iter().any(|c| c == id);

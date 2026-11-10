@@ -605,10 +605,15 @@ impl App {
                 video_any: false,
                 audio_any: false,
             };
-            if std::env::var("VLCCRAFT_SHOT_FULLSCREEN").is_ok() {
+            if let Ok(mode) = std::env::var("VLCCRAFT_SHOT_FULLSCREEN") {
                 app.fullscreen = true;
-                cc.egui_ctx
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                // "state" draws the full-screen chrome inside an ordinary
+                // window, so the bands can be looked at at a chosen width
+                // without taking over the person's screen.
+                if mode != "state" {
+                    cc.egui_ctx
+                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                }
             }
         } else {
             if !app.settings.onboarding_done {
@@ -1791,6 +1796,12 @@ impl App {
 
         let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
         if pointer_moved {
+            self.last_pointer_move = now;
+            self.last_interaction = now;
+        }
+        // A picture of full screen has to include the chrome it is a picture
+        // of: with no pointer to move, the bands would always be tucked away.
+        if self.shot.is_some() && self.fullscreen {
             self.last_pointer_move = now;
             self.last_interaction = now;
         }

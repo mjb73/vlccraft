@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        # macos-15-intel on purpose: the arm64 label (macos-14/macos-15) is not
+        # handing this account a runner, and an Intel Mac still proves the macOS
+        # code paths compile and link.
+        os: [ubuntu-24.04, macos-15-intel, windows-2022]
     steps:
       - uses: actions/checkout@v4
 

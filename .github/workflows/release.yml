@@ -81,15 +81,23 @@ jobs:
 
   macos:
     name: macos (${{ matrix.arch }})
-    runs-on: macos-14
+    # macos-15-intel is the label that gets a runner on this account; the arm64
+    # labels are queued or cancelled outright, so the Apple-silicon build is
+    # attempted and left optional rather than allowed to sink the release.
+    runs-on: ${{ matrix.label }}
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
           - arch: x86_64
             target: x86_64-apple-darwin
+            label: macos-15-intel
+            optional: false
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            label: macos-14
+            optional: true
     steps:
       - uses: actions/checkout@v4
 
@@ -202,9 +210,10 @@ jobs:
             ./vlccraft-*-x86_64-linux/install.sh
             ```
 
-            **macOS** — open the `.dmg` for your Mac (`aarch64` for Apple silicon,
-            `x86_64` for Intel) and drag VLCCraft to Applications. The app is signed
-            ad-hoc, so the first launch needs right-click → Open.
+            **macOS** — open the `.dmg` and drag VLCCraft to Applications. The `.dmg`
+            is a universal download: the Intel build also runs on Apple silicon
+            through Rosetta. The app is signed ad-hoc, so the first launch needs
+            right-click → Open.
 
             **Windows** — unzip and run `vlccraft.exe`. SmartScreen may warn about an
             unsigned download: More info → Run anyway.
