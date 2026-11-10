@@ -1,3 +1,9 @@
+// A player is a window, not a command prompt: on Windows the release build is
+// built as a windowed program so double-clicking it does not leave a black
+// console behind the interface. The few print-out flags attach to the console
+// of whoever ran them, further down.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod defaults;
 mod dialogs;
@@ -33,7 +39,32 @@ already open joins that window's queue instead of starting a second player.
   --default-status        print which player currently opens video and music
 ";
 
+/// Windows only: a windowed program owns no console, so the flags that print
+/// something borrow the console of the shell that started them.
+#[cfg(windows)]
+fn borrow_console() {
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    // Nothing has been printed yet, so the handle is still unclaimed: attaching
+    // first is what makes `--version` and `--help` visible from a terminal.
+    #[cfg(windows)]
+    if std::env::args().skip(1).any(|a| {
+        matches!(
+            a.as_str(),
+            "-h" | "--help" | "--version" | "--default-status" | "--restore-default"
+        ) || a.starts_with("--set-default")
+    }) {
+        borrow_console();
+    }
+
     let mut screenshot: Option<PathBuf> = None;
     let mut media: Vec<String> = Vec::new();
     let mut action: Option<String> = None;
