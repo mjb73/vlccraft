@@ -81,10 +81,13 @@ jobs:
 
   macos:
     name: macos (universal)
-    # One download that runs on every Mac. macos-15 gives an Apple-silicon
-    # runner; both slices are built there and joined with lipo, so the .dmg
-    # needs no Rosetta decision from the person downloading it.
-    runs-on: macos-15
+    # One download that runs on every Mac: both slices are built on the same
+    # runner and joined with lipo, so the person downloading needs no Rosetta
+    # decision. macos-15-intel is the label that actually gets a machine on this
+    # account — the arm64 labels (macos-14, macos-15) cancel or queue forever —
+    # and an Intel Mac can still build the arm64 slice, because the SDK is
+    # universal.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
