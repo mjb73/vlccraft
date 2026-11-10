@@ -1,5 +1,8 @@
 # VLCCraft
 
+[![CI](https://github.com/mjb73/vlccraft/actions/workflows/ci.yml/badge.svg)](https://github.com/mjb73/vlccraft/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mjb73/vlccraft)](https://github.com/mjb73/vlccraft/releases)
+
 A calm skin over the VLC you already have. Written in Rust with egui; runs on
 Linux, macOS and Windows.
 
@@ -56,11 +59,26 @@ The installer copies the program into `~/.local/bin`, adds an ordinary desktop
 entry and icon, and can then hand double-clicked video and music files over
 (Settings → General → Default player).
 
-**macOS** — open the `.dmg` for your Mac (`aarch64` for Apple silicon, `x86_64`
-for Intel) and drag VLCCraft to Applications. The app is signed ad-hoc, so the
-first launch needs right-click → Open.
+**macOS** — open the `.dmg` and drag VLCCraft to Applications. The one download
+carries both Apple-silicon and Intel code, so it runs natively on either Mac. The
+app is signed ad-hoc, so the first launch needs right-click → Open.
 
 **Windows** — unzip and run `vlccraft.exe`.
+
+### Downloads
+
+Every release carries one download per system, on the
+[releases page](https://github.com/mjb73/vlccraft/releases):
+
+| System | File | Install |
+|---|---|---|
+| Linux (x86_64) | `vlccraft-<version>-x86_64-linux.tar.gz` or `vlccraft_<version>_amd64.deb` | `install.sh` inside the tarball, or `sudo apt install ./vlccraft_*.deb` |
+| macOS (universal) | `VLCCraft-<version>.dmg` | drag to Applications |
+| Windows (x64) | `vlccraft-<version>-windows-x64.zip` | unzip and run |
+
+Each file has a `.sha256` beside it. The build for all three runs on GitHub's
+machines from the tagged source, so what you download is the code in this
+repository, not a binary someone carried here.
 
 ## Build from source
 

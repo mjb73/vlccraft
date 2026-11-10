@@ -80,51 +80,50 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: macos (${{ matrix.arch }})
-    # macos-15-intel is the label that gets a runner on this account; the arm64
-    # labels are queued or cancelled outright, so the Apple-silicon build is
-    # attempted and left optional rather than allowed to sink the release.
-    runs-on: ${{ matrix.label }}
-    continue-on-error: ${{ matrix.optional }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            target: x86_64-apple-darwin
-            label: macos-15-intel
-            optional: false
-          - arch: aarch64
-            target: aarch64-apple-darwin
-            label: macos-14
-            optional: true
+    name: macos (universal)
+    # One download that runs on every Mac. macos-15 gives an Apple-silicon
+    # runner; both slices are built there and joined with lipo, so the .dmg
+    # needs no Rosetta decision from the person downloading it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-${{ matrix.arch }}
+          key: macos-universal
 
-      - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Build both slices
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+
+      - name: Join the slices
+        run: |
+          lipo -create -output build-universal-vlccraft \
+            target/aarch64-apple-darwin/release/vlccraft \
+            target/x86_64-apple-darwin/release/vlccraft
+          lipo -archs build-universal-vlccraft
+          lipo -archs build-universal-vlccraft | grep -q x86_64
+          lipo -archs build-universal-vlccraft | grep -q arm64
 
       - name: Bundle and sign
         run: |
           V=${GITHUB_REF_NAME#v}
           chmod +x packaging/macos/make-app.sh
-          packaging/macos/make-app.sh \
-            "target/${{ matrix.target }}/release/vlccraft" "$V" dist
-          mv "dist/VLCCraft-$V.dmg" "dist/VLCCraft-$V-${{ matrix.arch }}.dmg"
-          ( cd dist && shasum -a 256 "VLCCraft-$V-${{ matrix.arch }}.dmg" \
-              > "VLCCraft-$V-${{ matrix.arch }}.dmg.sha256" )
+          packaging/macos/make-app.sh build-universal-vlccraft "$V" dist
+          ( cd dist && shasum -a 256 "VLCCraft-$V.dmg" > "VLCCraft-$V.dmg.sha256" )
+
+      - name: Check the bundle really is universal
+        run: |
+          lipo -archs dist/../build/dmg/VLCCraft.app/Contents/MacOS/vlccraft
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
+          name: macos-universal
           path: dist/*
           if-no-files-found: error
 
@@ -210,9 +209,9 @@ jobs:
             ./vlccraft-*-x86_64-linux/install.sh
             ```
 
-            **macOS** — open the `.dmg` and drag VLCCraft to Applications. The `.dmg`
-            is a universal download: the Intel build also runs on Apple silicon
-            through Rosetta. The app is signed ad-hoc, so the first launch needs
+            **macOS** — open the `.dmg` and drag VLCCraft to Applications. It is a
+            universal download: the same file runs natively on Apple silicon and on
+            Intel. The app is signed ad-hoc, so the first launch needs
             right-click → Open.
 
             **Windows** — unzip and run `vlccraft.exe`. SmartScreen may warn about an
