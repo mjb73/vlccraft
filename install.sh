@@ -30,17 +30,32 @@ prefix=${PREFIX:-$HOME/.local/bin}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
 appdata=$data/vlccraft
 
+show_help() {
+    # The header of this file is the help, so the two cannot disagree. Piped
+    # through `curl ... | sh` there is no file to read, so say where to look.
+    if [ -r "$0" ] && head -1 "$0" 2>/dev/null | grep -q "^#!"; then
+        awk 'NR>1 { if ($0 ~ /^set -eu/) exit; sub(/^# ?/, ""); print }' "$0"
+    else
+        printf '%s\n' "VLCCraft installer. Usage: sh install.sh [FILE.tar.gz]" \
+            "  --uninstall  remove the program, menu entry and icon" \
+            "  --purge      the same, and also forget library and settings" \
+            "More: https://github.com/$REPO#install"
+    fi
+}
+
 say() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
 die() { printf '\nvlccraft installer: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+[ -n "${HOME:-}" ] || die "HOME is not set, so there is no home folder to install into."
 
 mode=install
 want=
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            sed -n '2,26p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+            show_help
             exit 0
             ;;
         --uninstall) mode=uninstall ;;
